@@ -141,6 +141,10 @@ export class GeminiClient {
     return this.contentGenerator;
   }
 
+  getAuthType(): string | undefined {
+    return this.config.getContentGeneratorConfig()?.authType;
+  }
+
   getUserTier(): UserTierId | undefined {
     return this.contentGenerator?.userTier;
   }

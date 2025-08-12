@@ -28,7 +28,7 @@ interface OllamaGenerateRequest {
   model: string;
   prompt: string;
   stream?: boolean;
-  format?: string;
+  format?: string | Record<string, unknown>;
   options?: {
     temperature?: number;
     top_p?: number;
@@ -211,9 +211,11 @@ export class OllamaContentGenerator implements ContentGenerator {
    * Check if request should use JSON format
    */
   private shouldUseJsonFormat(request: GenerateContentParameters): boolean {
-    // For now, we'll look for JSON requests in the prompt content or config
-    // The actual generation config structure may be different in the API
-    return false; // Simplified for now
+    // Check if the request explicitly asks for JSON response
+    return !!(
+      request.config?.responseMimeType === 'application/json' ||
+      request.config?.responseJsonSchema
+    );
   }
 
   /**
@@ -234,7 +236,7 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    const prompt = this.contentsToPrompt(request.contents);
+    let prompt = this.contentsToPrompt(request.contents);
     
     const ollamaRequest: OllamaGenerateRequest = {
       model: this.config.model,
@@ -242,10 +244,18 @@ export class OllamaContentGenerator implements ContentGenerator {
       stream: false,
     };
 
-    // Handle JSON schema requests (simplified for now)
+    // Handle JSON schema requests
     if (this.shouldUseJsonFormat(request)) {
-      ollamaRequest.format = 'json';
-      ollamaRequest.prompt += '\n\nPlease respond in valid JSON format.';
+      if (request.config?.responseJsonSchema) {
+        // Use the actual schema as the format parameter according to Ollama API docs
+        ollamaRequest.format = request.config.responseJsonSchema as Record<string, unknown>;
+        // Also add explicit instructions to the prompt
+        const schemaPrompt = this.schemaToPromptText(request.config.responseJsonSchema);
+        ollamaRequest.prompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+      } else {
+        ollamaRequest.format = 'json';
+        ollamaRequest.prompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+      }
     }
 
     // Apply basic generation config (simplified for now)
@@ -257,6 +267,8 @@ export class OllamaContentGenerator implements ContentGenerator {
     }
 
     try {
+      console.debug('Ollama request:', JSON.stringify(ollamaRequest, null, 2));
+      
       const response = await fetch(`${this.config.baseUrl}/api/generate`, {
         method: 'POST',
         headers: {
@@ -270,6 +282,13 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
 
       const ollamaResponse: OllamaGenerateResponse = await response.json();
+      console.debug('Ollama response:', JSON.stringify(ollamaResponse, null, 2));
+      
+      // Check if we got an empty response
+      if (!ollamaResponse.response || ollamaResponse.response.trim() === '') {
+        throw new Error('Ollama returned an empty response. This may indicate the model cannot handle the requested JSON schema or the prompt is too complex.');
+      }
+      
       return this.ollamaToGeminiResponse(ollamaResponse);
     } catch (error) {
       throw new Error(`Failed to generate content with Ollama: ${error}`);
@@ -287,7 +306,7 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const prompt = this.contentsToPrompt(request.contents);
+    let prompt = this.contentsToPrompt(request.contents);
     
     const ollamaRequest: OllamaGenerateRequest = {
       model: this.config.model,
@@ -295,10 +314,18 @@ export class OllamaContentGenerator implements ContentGenerator {
       stream: true,
     };
 
-    // Handle JSON schema requests (simplified for now)
+    // Handle JSON schema requests
     if (this.shouldUseJsonFormat(request)) {
-      ollamaRequest.format = 'json';
-      ollamaRequest.prompt += '\n\nPlease respond in valid JSON format.';
+      if (request.config?.responseJsonSchema) {
+        // Use the actual schema as the format parameter according to Ollama API docs
+        ollamaRequest.format = request.config.responseJsonSchema as Record<string, unknown>;
+        // Also add explicit instructions to the prompt
+        const schemaPrompt = this.schemaToPromptText(request.config.responseJsonSchema);
+        ollamaRequest.prompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+      } else {
+        ollamaRequest.format = 'json';
+        ollamaRequest.prompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+      }
     }
 
     // Apply basic generation config (simplified for now)

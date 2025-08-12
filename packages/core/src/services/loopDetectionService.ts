@@ -9,6 +9,7 @@ import { GeminiEventType, ServerGeminiStreamEvent } from '../core/turn.js';
 import { logLoopDetected } from '../telemetry/loggers.js';
 import { LoopDetectedEvent, LoopType } from '../telemetry/types.js';
 import { Config, DEFAULT_GEMINI_FLASH_MODEL } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
@@ -358,9 +359,19 @@ Please analyze the conversation history to determine the possibility that the co
     };
     let result;
     try {
+      // For Ollama, use the configured model instead of hardcoded Gemini Flash model
+      const authType = this.config.getContentGeneratorConfig()?.authType;
+      const modelToUse = authType === AuthType.USE_OLLAMA ? undefined : DEFAULT_GEMINI_FLASH_MODEL;
+      
+      // For Ollama, skip complex JSON schema analysis due to limitations
+      if (authType === AuthType.USE_OLLAMA) {
+        // For now, assume no loop for Ollama to avoid JSON schema issues
+        return false;
+      }
+      
       result = await this.config
         .getGeminiClient()
-        .generateJson(contents, schema, signal, DEFAULT_GEMINI_FLASH_MODEL);
+        .generateJson(contents, schema, signal, modelToUse);
     } catch (e) {
       // Do nothing, treat it as a non-loop.
       this.config.getDebugMode() ? console.error(e) : console.debug(e);

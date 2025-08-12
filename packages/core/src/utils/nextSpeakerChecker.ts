@@ -9,6 +9,7 @@ import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { GeminiClient } from '../core/client.js';
 import { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 const CHECK_PROMPT = `Analyze *only* the content and structure of your immediately preceding response (your last turn in the conversation history). Based *strictly* on that response, determine who should logically speak next: the 'user' or the 'model' (you).
 **Decision Rules (apply in order):**
@@ -108,11 +109,39 @@ export async function checkNextSpeaker(
   ];
 
   try {
+    // For Ollama, use the configured model instead of hardcoded Gemini Flash model
+    const authType = geminiClient.getAuthType();
+    const modelToUse = authType === AuthType.USE_OLLAMA ? undefined : DEFAULT_GEMINI_FLASH_MODEL;
+    
+    // For Ollama, use a simpler fallback approach due to JSON schema limitations
+    if (authType === AuthType.USE_OLLAMA) {
+      // For now, skip the complex JSON schema analysis for Ollama
+      // and use a simple heuristic: if the last message ends with a question, user should speak next
+      if (lastMessage && lastMessage.parts) {
+        const lastPart = lastMessage.parts[lastMessage.parts.length - 1];
+        if (lastPart && 'text' in lastPart && lastPart.text) {
+          const text = lastPart.text.trim();
+          if (text.endsWith('?')) {
+            return {
+              reasoning: 'Last response ended with a question, so user should respond',
+              next_speaker: 'user'
+            };
+          }
+        }
+      }
+      
+      // Default: user should speak next (most common case)
+      return {
+        reasoning: 'Default behavior for conversation flow',
+        next_speaker: 'user'
+      };
+    }
+    
     const parsedResponse = (await geminiClient.generateJson(
       contents,
       RESPONSE_SCHEMA,
       abortSignal,
-      DEFAULT_GEMINI_FLASH_MODEL,
+      modelToUse,
     )) as unknown as NextSpeakerResponse;
 
     if (
