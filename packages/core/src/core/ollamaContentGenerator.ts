@@ -17,7 +17,7 @@ import {
   Candidate,
 } from '@google/genai';
 import { ContentGenerator } from './contentGenerator.js';
-import { setOllamaModelContextLength } from './ollamaTokenLimits.js';
+import { setOllamaModelContextLength, getOllamaModelContextLength } from './ollamaTokenLimits.js';
 
 interface OllamaConfig {
   baseUrl: string;
@@ -94,7 +94,7 @@ export class OllamaContentGenerator implements ContentGenerator {
 
   constructor(config: OllamaConfig) {
     this.config = config;
-    // Asynchronously discover and cache the context length
+    // Synchronously start context length initialization but don't wait for it
     this.initializeContextLength();
   }
 
@@ -113,7 +113,28 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Convert Gemini-style contents to Ollama prompt
+   * Ensure context length is initialized before operations
+   */
+  public async ensureContextLengthInitialized(): Promise<void> {
+    // Check if context length is already cached
+    if (getOllamaModelContextLength(this.config.model)) {
+      return;
+    }
+    
+    // If not cached, initialize it now
+    await this.initializeContextLength();
+  }
+
+  /**
+   * Estimate token count for text (rough approximation: 1 token ≈ 4 characters)
+   */
+  private estimateTokenCount(text: string): number {
+    if (!text) return 0;
+    return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Convert Gemini-style contents to Ollama prompt (with proper chat history handling)
    */
   private contentsToPrompt(contents: ContentListUnion): string {
     // Handle different content union types
@@ -124,27 +145,9 @@ export class OllamaContentGenerator implements ContentGenerator {
     if (Array.isArray(contents)) {
       if (contents.length === 0) return '';
       
-      // Check if it's an array of Content objects
+      // Check if it's an array of Content objects (chat history)
       if (typeof contents[0] === 'object' && 'parts' in contents[0]) {
-        return (contents as Content[])
-          .map((content) => {
-            if (content.parts) {
-              return content.parts
-                .map((part) => {
-                  if (typeof part === 'string') {
-                    return part;
-                  }
-                  if (typeof part === 'object' && 'text' in part) {
-                    return part.text;
-                  }
-                  // For now, skip non-text parts (images, etc.)
-                  return '';
-                })
-                .join('');
-            }
-            return '';
-          })
-          .join('\n');
+        return this.buildChatPrompt(contents as Content[]);
       } else {
         // Array of parts
         return contents
@@ -183,14 +186,70 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
+   * Build a chat prompt from the complete conversation history
+   */
+  private buildChatPrompt(contents: Content[]): string {
+    const promptParts: string[] = [];
+    
+    for (const content of contents) {
+      if (!content.parts) continue;
+      
+      const text = content.parts
+        .map((part) => {
+          if (typeof part === 'string') {
+            return part;
+          }
+          if (typeof part === 'object' && 'text' in part) {
+            return part.text;
+          }
+          // For now, skip non-text parts (images, function calls, etc.)
+          return '';
+        })
+        .join('')
+        .trim();
+      
+      if (!text) continue;
+      
+      // Format based on role
+      if (content.role === 'user') {
+        promptParts.push(`Human: ${text}`);
+      } else if (content.role === 'model') {
+        promptParts.push(`Assistant: ${text}`);
+      } else if (content.role === 'system') {
+        promptParts.push(`System: ${text}`);
+      } else {
+        // Default to user if role is unclear
+        promptParts.push(`Human: ${text}`);
+      }
+    }
+    
+    // Add a final "Assistant:" to prompt for the next response
+    if (promptParts.length > 0) {
+      promptParts.push('Assistant:');
+    }
+    
+    return promptParts.join('\n\n');
+  }
+
+  /**
    * Convert Ollama response to Gemini-style response
    */
   private ollamaToGeminiResponse(
     ollamaResponse: OllamaGenerateResponse,
+    fullPromptText?: string,
   ): GenerateContentResponse {
     const usageMetadata = new GenerateContentResponseUsageMetadata();
-    usageMetadata.promptTokenCount = ollamaResponse.prompt_eval_count || 0;
-    usageMetadata.candidatesTokenCount = ollamaResponse.eval_count || 0;
+    
+    // Use Ollama's token counts if available, otherwise estimate
+    // Now promptTokenCount represents the ENTIRE conversation history
+    const promptTokenCount = ollamaResponse.prompt_eval_count || 
+      (fullPromptText ? this.estimateTokenCount(fullPromptText) : 0);
+    const candidatesTokenCount = ollamaResponse.eval_count || 
+      this.estimateTokenCount(ollamaResponse.response);
+    
+    usageMetadata.promptTokenCount = promptTokenCount;
+    usageMetadata.candidatesTokenCount = candidatesTokenCount;
+    usageMetadata.totalTokenCount = promptTokenCount + candidatesTokenCount;
 
     const candidate: Candidate = {
       content: {
@@ -289,7 +348,7 @@ export class OllamaContentGenerator implements ContentGenerator {
         throw new Error('Ollama returned an empty response. This may indicate the model cannot handle the requested JSON schema or the prompt is too complex.');
       }
       
-      return this.ollamaToGeminiResponse(ollamaResponse);
+      return this.ollamaToGeminiResponse(ollamaResponse, prompt);
     } catch (error) {
       throw new Error(`Failed to generate content with Ollama: ${error}`);
     }
@@ -307,6 +366,7 @@ export class OllamaContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
     let prompt = this.contentsToPrompt(request.contents);
+    const originalPrompt = prompt;
     
     const ollamaRequest: OllamaGenerateRequest = {
       model: this.config.model,
@@ -379,7 +439,7 @@ export class OllamaContentGenerator implements ContentGenerator {
                 if (ollamaResponse.response) {
                   totalResponse += ollamaResponse.response;
                   
-                  const geminiResponse = this.ollamaToGeminiResponse(ollamaResponse);
+                  const geminiResponse = this.ollamaToGeminiResponse(ollamaResponse, originalPrompt);
                   // For streaming, only include the new incremental text
                   if (geminiResponse.candidates && geminiResponse.candidates[0] && 
                       geminiResponse.candidates[0].content && geminiResponse.candidates[0].content.parts &&

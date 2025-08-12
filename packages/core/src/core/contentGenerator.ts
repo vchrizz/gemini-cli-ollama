@@ -160,10 +160,12 @@ export async function createContentGenerator(
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
       model: config.model,
     };
-    return new LoggingContentGenerator(
-      new OllamaContentGenerator(ollamaConfig),
-      gcConfig,
-    );
+    const ollamaGenerator = new OllamaContentGenerator(ollamaConfig);
+    
+    // Ensure context length is initialized synchronously
+    await ollamaGenerator.ensureContextLengthInitialized();
+    
+    return new LoggingContentGenerator(ollamaGenerator, gcConfig);
   }
 
   throw new Error(
