@@ -4,12 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getOllamaModelContextLength, isOllamaModel } from './ollamaTokenLimits.js';
+
 type Model = string;
 type TokenCount = number;
 
 export const DEFAULT_TOKEN_LIMIT = 1_048_576;
 
 export function tokenLimit(model: Model): TokenCount {
+  // Check if this is an Ollama model first
+  if (isOllamaModel(model)) {
+    const ollamaContextLength = getOllamaModelContextLength(model);
+    if (ollamaContextLength) {
+      return ollamaContextLength;
+    }
+    // Default for unknown Ollama models
+    return 4096;
+  }
+
   // Add other models as they become relevant or if specified by config
   // Pulled from https://ai.google.dev/gemini-api/docs/models
   switch (model) {

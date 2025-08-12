@@ -10,7 +10,8 @@ import { Colors } from '../colors.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { AuthType } from '@google/gemini-cli-core';
-import { validateAuthMethod } from '../../config/auth.js';
+import { validateAuthMethod, validateAuthMethodAsync } from '../../config/auth.js';
+import { discoverAndConfigureOllamaModel } from '../../config/ollamaDiscovery.js';
 
 interface AuthDialogProps {
   onSelect: (authMethod: AuthType | undefined, scope: SettingScope) => void;
@@ -77,6 +78,7 @@ export function AuthDialog({
       value: AuthType.USE_GEMINI,
     },
     { label: 'Vertex AI', value: AuthType.USE_VERTEX_AI },
+    { label: 'Ollama', value: AuthType.USE_OLLAMA },
   ];
 
   const initialAuthIndex = items.findIndex((item) => {
@@ -98,7 +100,34 @@ export function AuthDialog({
     return item.value === AuthType.LOGIN_WITH_GOOGLE;
   });
 
-  const handleAuthSelect = (authMethod: AuthType) => {
+  const handleAuthSelect = async (authMethod: AuthType) => {
+    // For Ollama, handle model discovery
+    if (authMethod === AuthType.USE_OLLAMA) {
+      setErrorMessage('Connecting to Ollama and discovering models...');
+      
+      // First check if model is already configured
+      if (!settings.merged.ollamaModel) {
+        const discovery = await discoverAndConfigureOllamaModel(settings);
+        if (!discovery.success) {
+          setErrorMessage(discovery.error || 'Failed to configure Ollama');
+          return;
+        }
+        setErrorMessage(`Configured Ollama with model: ${discovery.model}`);
+      }
+      
+      // Validate the configuration
+      const error = await validateAuthMethodAsync(authMethod, settings);
+      if (error) {
+        setErrorMessage(error);
+        return;
+      }
+      
+      setErrorMessage(null);
+      onSelect(authMethod, SettingScope.User);
+      return;
+    }
+    
+    // For other auth methods, use sync validation
     const error = validateAuthMethod(authMethod);
     if (error) {
       setErrorMessage(error);

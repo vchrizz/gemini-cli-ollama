@@ -198,6 +198,8 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
+  ollamaBaseUrl?: string;
+  ollamaModel?: string;
 }
 
 export class Config {
@@ -262,6 +264,8 @@ export class Config {
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
+  private readonly ollamaBaseUrl: string | undefined;
+  private readonly ollamaModel: string | undefined;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -326,6 +330,8 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
+    this.ollamaBaseUrl = params.ollamaBaseUrl;
+    this.ollamaModel = params.ollamaModel;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -404,6 +410,10 @@ export class Config {
   }
 
   getModel(): string {
+    // For Ollama, use the Ollama-specific model if available
+    if (this.contentGeneratorConfig?.authType === AuthType.USE_OLLAMA && this.ollamaModel) {
+      return this.ollamaModel;
+    }
     return this.contentGeneratorConfig?.model || this.model;
   }
 
@@ -599,6 +609,14 @@ export class Config {
 
   getProxy(): string | undefined {
     return this.proxy;
+  }
+
+  getOllamaBaseUrl(): string | undefined {
+    return this.ollamaBaseUrl;
+  }
+
+  getOllamaModel(): string | undefined {
+    return this.ollamaModel;
   }
 
   getWorkingDir(): string {

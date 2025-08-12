@@ -14,6 +14,7 @@ Gemini CLI is an open-source AI agent that brings the power of Gemini directly i
 - **🧠 Powerful Gemini 2.5 Pro**: Access to 1M token context window
 - **🔧 Built-in tools**: Google Search grounding, file operations, shell commands, web fetching
 - **🔌 Extensible**: MCP (Model Context Protocol) support for custom integrations
+- **🏠 Local AI Support**: Run models locally with Ollama for complete privacy
 - **💻 Terminal-first**: Designed for developers who live in the command line
 - **🛡️ Open source**: Apache 2.0 licensed
 
@@ -128,6 +129,47 @@ export GOOGLE_API_KEY="YOUR_API_KEY"
 export GOOGLE_GENAI_USE_VERTEXAI=true
 gemini
 ```
+
+### Option 4: Ollama (Local AI Models)
+
+**✨ Best for:** Developers who want to run AI models locally for privacy, offline access, or custom models
+
+**Benefits:**
+
+- **Complete privacy**: Models run locally on your machine
+- **Offline access**: No internet connection required after model download
+- **Custom models**: Use any Ollama-compatible model
+- **No API costs**: Free to use after initial setup
+
+#### Prerequisites
+
+1. Install [Ollama](https://ollama.ai/) on your system
+2. Download a model (e.g., `ollama pull llama2`)
+3. Ensure Ollama is running (`ollama serve`)
+
+#### Setup
+
+```bash
+# Start Gemini CLI and select Ollama option
+gemini
+# The CLI will automatically detect available models and configure itself
+```
+
+#### Configuration
+
+Ollama settings can be customized in your `~/.gemini/settings.json`:
+
+```json
+{
+  "selectedAuthType": "ollama",
+  "ollamaBaseUrl": "http://localhost:11434",
+  "ollamaModel": "llama2"
+}
+```
+
+**Configuration options:**
+- `ollamaBaseUrl`: The Ollama server URL (default: `http://localhost:11434`)
+- `ollamaModel`: The model to use (auto-detected from available models)
 
 For Google Workspace accounts and other authentication methods, see the [authentication guide](./docs/cli/authentication.md).
 

@@ -19,6 +19,7 @@ import { Config } from '../config/config.js';
 import { getEffectiveModel } from './modelCheck.js';
 import { UserTierId } from '../code_assist/types.js';
 import { LoggingContentGenerator } from './loggingContentGenerator.js';
+import { OllamaContentGenerator } from './ollamaContentGenerator.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -46,6 +47,7 @@ export enum AuthType {
   USE_GEMINI = 'gemini-api-key',
   USE_VERTEX_AI = 'vertex-ai',
   CLOUD_SHELL = 'cloud-shell',
+  USE_OLLAMA = 'ollama',
 }
 
 export type ContentGeneratorConfig = {
@@ -54,6 +56,7 @@ export type ContentGeneratorConfig = {
   vertexai?: boolean;
   authType?: AuthType | undefined;
   proxy?: string | undefined;
+  ollamaBaseUrl?: string;
 };
 
 export function createContentGeneratorConfig(
@@ -72,6 +75,7 @@ export function createContentGeneratorConfig(
     model: effectiveModel,
     authType,
     proxy: config?.getProxy(),
+    ollamaBaseUrl: config?.getOllamaBaseUrl(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -101,6 +105,12 @@ export function createContentGeneratorConfig(
     contentGeneratorConfig.apiKey = googleApiKey;
     contentGeneratorConfig.vertexai = true;
 
+    return contentGeneratorConfig;
+  }
+
+  if (authType === AuthType.USE_OLLAMA) {
+    // For Ollama, we just need to ensure the base URL is set
+    // Model validation will be done when creating the content generator
     return contentGeneratorConfig;
   }
 
@@ -144,6 +154,18 @@ export async function createContentGenerator(
     });
     return new LoggingContentGenerator(googleGenAI.models, gcConfig);
   }
+
+  if (config.authType === AuthType.USE_OLLAMA) {
+    const ollamaConfig = {
+      baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
+      model: config.model,
+    };
+    return new LoggingContentGenerator(
+      new OllamaContentGenerator(ollamaConfig),
+      gcConfig,
+    );
+  }
+
   throw new Error(
     `Error creating contentGenerator: Unsupported authType: ${config.authType}`,
   );

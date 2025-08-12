@@ -5,7 +5,8 @@
  */
 
 import { AuthType } from '@google/gemini-cli-core';
-import { loadEnvironment } from './settings.js';
+import { loadEnvironment, LoadedSettings } from './settings.js';
+import { validateOllamaConfiguration } from './ollamaDiscovery.js';
 
 export const validateAuthMethod = (authMethod: string): string | null => {
   loadEnvironment();
@@ -38,5 +39,36 @@ export const validateAuthMethod = (authMethod: string): string | null => {
     return null;
   }
 
+  if (authMethod === AuthType.USE_OLLAMA) {
+    // For Ollama, we need to check if the service is available and has models
+    // The actual validation will be done asynchronously during auth setup
+    return null;
+  }
+
   return 'Invalid auth method selected.';
+};
+
+/**
+ * Async version of auth validation that can handle Ollama model discovery
+ */
+export const validateAuthMethodAsync = async (
+  authMethod: string,
+  settings?: LoadedSettings,
+): Promise<string | null> => {
+  // For non-Ollama methods, use sync validation
+  if (authMethod !== AuthType.USE_OLLAMA) {
+    return validateAuthMethod(authMethod);
+  }
+
+  // For Ollama, do deep validation including model checking
+  if (!settings) {
+    return 'Settings required for Ollama validation';
+  }
+
+  const validation = await validateOllamaConfiguration(settings);
+  if (!validation.isValid) {
+    return validation.message || 'Ollama configuration is invalid';
+  }
+
+  return null;
 };

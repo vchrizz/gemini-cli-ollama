@@ -34,6 +34,7 @@ import { Extension, annotateActiveExtensions } from './extension.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { resolvePath } from '../utils/resolvePath.js';
+import { AuthType } from '@google/gemini-cli-core';
 
 // Simple console logger for now - replace with actual logger if available
 const logger = {
@@ -44,6 +45,19 @@ const logger = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   error: (...args: any[]) => console.error('[ERROR]', ...args),
 };
+
+/**
+ * Get the effective model based on auth type and settings
+ */
+function getEffectiveModel(settings: Settings): string | undefined {
+  // For Ollama, use the Ollama-specific model setting
+  if (settings.selectedAuthType === AuthType.USE_OLLAMA) {
+    return settings.ollamaModel;
+  }
+  
+  // For other auth types, use the general model setting
+  return settings.model;
+}
 
 export interface CliArgs {
   model: string | undefined;
@@ -464,7 +478,7 @@ export async function loadCliConfig(
     cwd: process.cwd(),
     fileDiscoveryService: fileService,
     bugCommand: settings.bugCommand,
-    model: argv.model || settings.model || DEFAULT_GEMINI_MODEL,
+    model: argv.model || getEffectiveModel(settings) || DEFAULT_GEMINI_MODEL,
     extensionContextFilePaths,
     maxSessionTurns: settings.maxSessionTurns ?? -1,
     experimentalAcp: argv.experimentalAcp || false,
@@ -479,6 +493,8 @@ export async function loadCliConfig(
     folderTrustFeature,
     folderTrust,
     interactive,
+    ollamaBaseUrl: settings.ollamaBaseUrl,
+    ollamaModel: settings.ollamaModel,
   });
 }
 
