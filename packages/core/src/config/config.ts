@@ -200,6 +200,10 @@ export interface ConfigParameters {
   interactive?: boolean;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
+  ollamaEnableChatApi?: boolean;
+  ollamaGpuHangProtection?: boolean;
+  ollamaModelSizeThreshold?: number;
+  ollamaDebugLogging?: boolean;
 }
 
 export class Config {
@@ -266,6 +270,10 @@ export class Config {
   private readonly interactive: boolean;
   private readonly ollamaBaseUrl: string | undefined;
   private readonly ollamaModel: string | undefined;
+  private readonly ollamaEnableChatApi: boolean;
+  private readonly ollamaGpuHangProtection: boolean;
+  private readonly ollamaModelSizeThreshold: number;
+  private readonly ollamaDebugLogging: boolean;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -332,6 +340,10 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.ollamaBaseUrl = params.ollamaBaseUrl;
     this.ollamaModel = params.ollamaModel;
+    this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? false;
+    this.ollamaGpuHangProtection = params.ollamaGpuHangProtection ?? true;
+    this.ollamaModelSizeThreshold = params.ollamaModelSizeThreshold ?? 30;
+    this.ollamaDebugLogging = params.ollamaDebugLogging ?? false;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -617,6 +629,21 @@ export class Config {
 
   getOllamaModel(): string | undefined {
     return this.ollamaModel;
+  }
+  getOllamaEnableChatApi(): boolean {
+    return this.ollamaEnableChatApi;
+  }
+
+  getOllamaGpuHangProtection(): boolean {
+    return this.ollamaGpuHangProtection;
+  }
+
+  getOllamaModelSizeThreshold(): number {
+    return this.ollamaModelSizeThreshold;
+  }
+
+  getOllamaDebugLogging(): boolean {
+    return this.ollamaDebugLogging;
   }
 
   getWorkingDir(): string {
