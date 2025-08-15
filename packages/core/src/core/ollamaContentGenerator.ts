@@ -166,6 +166,27 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
+   * Write detailed debug log to file for analysis
+   */
+  private async writeDebugLog(eventType: string, data: any): Promise<void> {
+    try {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        eventType,
+        data,
+        separator: '---ENTRY_END---'
+      };
+      
+      const logText = JSON.stringify(logEntry, null, 2) + '\n\n';
+      
+      const fs = await import('fs');
+      fs.appendFileSync('./ollama-debug.log', logText);
+    } catch (error) {
+      console.warn('Failed to write debug log:', error);
+    }
+  }
+
+  /**
    * Initialize context length for the model
    */
   private async initializeContextLength(): Promise<void> {
@@ -306,22 +327,38 @@ export class OllamaContentGenerator implements ContentGenerator {
               type: 'function',
               function: {
                 name: functionCall.name || '',
-                arguments: JSON.stringify(functionCall.args || {}),
+                arguments: functionCall.args || {},
               }
             });
           } else if ('functionResponse' in part && part.functionResponse) {
             hasFunctionResponse = true;
-            // For function responses, we'll handle them separately
+            // Extract text content from function response for Ollama
+            const functionResponse = part.functionResponse as any;
+            if (functionResponse.response) {
+              // Add the function response content as text
+              if (typeof functionResponse.response === 'string') {
+                textContent += functionResponse.response;
+              } else if (functionResponse.response.output) {
+                textContent += functionResponse.response.output;
+              } else if (functionResponse.response.error) {
+                textContent += `Error: ${functionResponse.response.error}`;
+              } else {
+                textContent += JSON.stringify(functionResponse.response);
+              }
+            }
           }
         }
       }
       
       if (hasFunctionResponse) {
-        // This is a tool response message
-        messages.push({
-          role: 'tool',
-          content: textContent.trim() || 'Function executed successfully',
-        });
+        // Function responses represent tool execution results
+        // Send as 'tool' message as per Ollama API specification
+        if (textContent.trim()) {
+          messages.push({
+            role: 'tool',
+            content: textContent.trim(),
+          });
+        }
       } else {
         // Regular message
         const role = content.role === 'model' ? 'assistant' : 'user';
@@ -493,35 +530,25 @@ export class OllamaContentGenerator implements ContentGenerator {
       });
     }
     
-    // Extract user message - simplified to match working cURL
-    let userContent = '';
-    
-    // Extract user content from request
-    if (typeof request.contents === 'string') {
-      userContent = request.contents;
-    } else if (Array.isArray(request.contents)) {
-      // Extract the LAST user message from conversation history
-      const contents = request.contents as Content[];
-      for (let i = contents.length - 1; i >= 0; i--) {
-        const content = contents[i];
-        if (content.role === 'user' && content.parts) {
-          const text = content.parts
-            .map((part) => {
-              if (typeof part === 'string') return part;
-              if (typeof part === 'object' && 'text' in part) return part.text;
-              return '';
-            })
-            .join('')
-            .trim();
-          if (text) {
-            userContent = text;
-            break;
-          }
-        }
+    // PROPER TOOL CALLING APPROACH: Use full conversation history for tool calling
+    // Tool calling requires proper conversation context with assistant/tool message flow
+    if (Array.isArray(request.contents)) {
+      const conversationMessages = this.buildChatMessages(request.contents as Content[]);
+      messages.push(...conversationMessages);
+    } else if (typeof request.contents === 'string') {
+      messages.push({
+        role: 'user',
+        content: request.contents
+      });
+    } else if (request.contents) {
+      // Single content object
+      const userContent = this.extractTextFromContent(request.contents as any);
+      if (userContent) {
+        messages.push({
+          role: 'user',
+          content: userContent
+        });
       }
-    } else {
-      // For any other complex content, try extract text parts
-      userContent = this.extractTextFromContent(request.contents as any);
     }
     
     // Optional debug logging to file (if enabled in config)
@@ -529,7 +556,7 @@ export class OllamaContentGenerator implements ContentGenerator {
       const debugLog = {
         timestamp: new Date().toISOString(),
         contentType: typeof request.contents,
-        extractedContent: userContent,
+        messageCount: messages.length,
         hasTools: this.hasTools(request),
         requestSummary: {
           isString: typeof request.contents === 'string',
@@ -544,16 +571,16 @@ export class OllamaContentGenerator implements ContentGenerator {
       }).catch(err => console.warn('Debug log failed:', err));
     }
     
-    // Always add user message
-    if (!userContent) {
+    // Validate that we have at least one message
+    if (messages.length === 1) {
+      // Only system message - need user input
       console.warn('⚠️ No user content found in request, this should not happen!');
       console.log('Request contents:', JSON.stringify(request.contents, null, 2));
+      messages.push({
+        role: 'user',
+        content: "Please provide a valid command to execute."
+      });
     }
-    
-    messages.push({
-      role: 'user',
-      content: userContent || "Please provide a valid command to execute."
-    });
     
     if (this.config.debugLogging) {
       console.log('🔧 Final chat messages for API:', JSON.stringify(messages, null, 2));
@@ -591,6 +618,10 @@ export class OllamaContentGenerator implements ContentGenerator {
     // Add function calls if present (check both message and response level)
     const toolCalls = ollamaResponse.message.tool_calls || ollamaResponse.tool_calls;
     if (toolCalls) {
+      // CRITICAL FIX: Deduplicate tool calls to prevent execution loops
+      // Ollama sometimes generates duplicate identical tool calls
+      const seenCalls = new Set<string>();
+      
       for (const toolCall of toolCalls) {
         let args = {};
         try {
@@ -603,6 +634,16 @@ export class OllamaContentGenerator implements ContentGenerator {
           console.warn('Failed to parse tool arguments:', toolCall.function.arguments);
           args = {};
         }
+        
+        // Create a unique signature for this tool call
+        const callSignature = `${toolCall.function.name}:${JSON.stringify(args)}`;
+        
+        // Skip if we've already seen this exact tool call
+        if (seenCalls.has(callSignature)) {
+          console.log(`🔄 Skipping duplicate tool call: ${callSignature}`);
+          continue;
+        }
+        seenCalls.add(callSignature);
         
         parts.push({
           functionCall: {
@@ -659,6 +700,10 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     // Add function calls if present (unified handling for both APIs)
     if (ollamaResponse.tool_calls) {
+      // CRITICAL FIX: Deduplicate tool calls to prevent execution loops
+      // Ollama sometimes generates duplicate identical tool calls
+      const seenCalls = new Set<string>();
+      
       for (const toolCall of ollamaResponse.tool_calls) {
         let args = {};
         try {
@@ -671,6 +716,16 @@ export class OllamaContentGenerator implements ContentGenerator {
           console.warn('Failed to parse tool arguments:', toolCall.function.arguments);
           args = {};
         }
+        
+        // Create a unique signature for this tool call
+        const callSignature = `${toolCall.function.name}:${JSON.stringify(args)}`;
+        
+        // Skip if we've already seen this exact tool call
+        if (seenCalls.has(callSignature)) {
+          console.log(`🔄 Skipping duplicate tool call: ${callSignature}`);
+          continue;
+        }
+        seenCalls.add(callSignature);
         
         parts.push({
           functionCall: {
@@ -766,17 +821,55 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // ALWAYS log this call for debugging
+    console.log('🚨 OLLAMA generateContent called! Config.debugLogging:', this.config.debugLogging);
+    
     const hasTools = this.hasTools(request);
     const enableChatApi = this.config.enableChatApi ?? true; // Default to Chat API for tool calling
     
     const tools = (request as any).tools || request.config?.tools;
-    console.log('🚀 Ollama generateContent called with:', {
-      hasTools,
-      enableChatApi,
-      toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
-      contentType: typeof request.contents,
-      willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)
-    });
+    
+    // Detailed debug logging if enabled
+    if (this.config.debugLogging) {
+      console.log('📝 Writing debug log...');
+      try {
+        await this.writeDebugLog('GENERATE_CONTENT_CALL', {
+          timestamp: new Date().toISOString(),
+          userPromptId,
+          hasTools,
+          enableChatApi,
+          toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
+          contentType: typeof request.contents,
+          willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi),
+          callStack: new Error().stack?.split('\n').slice(1, 6).map(line => line.trim()),
+          requestContents: Array.isArray(request.contents) ? 
+            (request.contents as any[]).map((content, idx) => ({
+              index: idx,
+              role: content.role,
+              partsCount: content.parts?.length || 0,
+              hasText: content.parts?.some((p: any) => typeof p === 'string' || p.text),
+              hasFunctionCall: content.parts?.some((p: any) => p.functionCall),
+              hasFunctionResponse: content.parts?.some((p: any) => p.functionResponse)
+            })) : 
+            `${typeof request.contents}: ${JSON.stringify(request.contents).substring(0, 100)}...`
+        });
+        console.log('✅ Debug log written successfully');
+      } catch (error) {
+        console.error('❌ Failed to write debug log:', error);
+      }
+    } else {
+      console.log('❌ Debug logging is DISABLED');
+    }
+    
+    if (!this.config.debugLogging) {
+      console.log('🚀 Ollama generateContent called with:', {
+        hasTools,
+        enableChatApi,
+        toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
+        contentType: typeof request.contents,
+        willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)
+      });
+    }
     
     if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
       // Use Chat API for tool calling (as demonstrated in your working cURL example)
@@ -858,6 +951,16 @@ export class OllamaContentGenerator implements ContentGenerator {
         console.log(JSON.stringify(ollamaRequest, null, 2));
       }
       
+      // Debug log the request if enabled
+      if (this.config.debugLogging) {
+        await this.writeDebugLog('OLLAMA_REQUEST', {
+          model: ollamaRequest.model,
+          messagesCount: ollamaRequest.messages.length,
+          toolsCount: ollamaRequest.tools?.length || 0,
+          fullRequest: ollamaRequest
+        });
+      }
+      
       // Additional validation to prevent GPU hangs
       if (ollamaRequest.messages.length === 0) {
         throw new Error('No messages to send to Ollama API');
@@ -906,6 +1009,23 @@ export class OllamaContentGenerator implements ContentGenerator {
         hasToolCalls: !!ollamaResponse.message?.tool_calls,
         done: ollamaResponse.done
       });
+      
+      // Debug log the response if enabled
+      if (this.config.debugLogging) {
+        await this.writeDebugLog('OLLAMA_RESPONSE', {
+          hasMessage: !!ollamaResponse.message,
+          hasContent: !!ollamaResponse.message?.content,
+          hasToolCalls: !!ollamaResponse.message?.tool_calls,
+          toolCallsCount: ollamaResponse.message?.tool_calls?.length || 0,
+          toolCalls: ollamaResponse.message?.tool_calls?.map(call => ({
+            name: call.function.name,
+            arguments: call.function.arguments,
+            id: call.id
+          })),
+          done: ollamaResponse.done,
+          fullResponse: ollamaResponse
+        });
+      }
       
       return this.ollamaChatToGeminiResponse(ollamaResponse);
     } catch (error) {
