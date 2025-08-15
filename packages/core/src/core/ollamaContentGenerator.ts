@@ -29,6 +29,7 @@ interface OllamaConfig {
   model: string;
   enableChatApi?: boolean;
   timeout?: number; // Timeout in milliseconds
+  streamingTimeout?: number; // Streaming timeout in milliseconds
   contextLimit?: number; // Context window size (num_ctx)
   debugLogging?: boolean; // Enable debug logging to file
 }
@@ -895,6 +896,13 @@ export class OllamaContentGenerator implements ContentGenerator {
     return this.config.timeout || 120000; // Default 2 minutes if not configured
   }
 
+  /**
+   * Get streaming timeout for API requests from config
+   */
+  private getStreamingTimeout(): number {
+    return this.config.streamingTimeout || 300000; // Default 5 minutes if not configured
+  }
+
 
   /**
    * Call Ollama Chat API (for tool calling) - matches your working cURL example
@@ -1179,7 +1187,7 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const timeout = this.getTimeout() * 2; // Double timeout for streaming
+    const timeout = this.getStreamingTimeout(); // Use dedicated streaming timeout
     
     // Use AbortController for timeout
     const controller = new AbortController();
@@ -1189,6 +1197,18 @@ export class OllamaContentGenerator implements ContentGenerator {
     }, timeout);
 
     try {
+      // Debug log the stream call if enabled
+      if (this.config.debugLogging) {
+        await this.writeDebugLog('CHAT_API_STREAM_START', {
+          userPromptId,
+          timeout,
+          hasTools: this.hasTools(request),
+          contentType: typeof request.contents,
+          isArray: Array.isArray(request.contents),
+          arrayLength: Array.isArray(request.contents) ? request.contents.length : 0
+        });
+      }
+
       // Build messages using the improved method
       const messages: OllamaChatMessage[] = this.buildChatMessagesForApi(request);
       const toolsSource = (request as any).tools || request.config?.tools;
@@ -1211,6 +1231,17 @@ export class OllamaContentGenerator implements ContentGenerator {
         num_ctx: this.config.contextLimit || 2048, // Use configured context limit
       };
 
+      // Debug log the request if enabled
+      if (this.config.debugLogging) {
+        await this.writeDebugLog('CHAT_API_STREAM_REQUEST', {
+          model: ollamaRequest.model,
+          messagesCount: ollamaRequest.messages.length,
+          toolsCount: ollamaRequest.tools?.length || 0,
+          fullRequest: ollamaRequest
+        });
+      }
+
+      console.log(`🚀 Ollama Chat API stream request to: ${this.config.baseUrl}/api/chat`);
       const response = await fetch(`${this.config.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {

@@ -71,6 +71,17 @@ Logging in with Google... Please restart Gemini CLI to continue.
           );
           process.exit(0);
         }
+        if (authType === AuthType.USE_OLLAMA) {
+          runExitCleanup();
+          console.log(
+            `
+----------------------------------------------------------------
+Ollama configured successfully! Please restart Gemini CLI to continue.
+----------------------------------------------------------------
+            `,
+          );
+          process.exit(0);
+        }
       }
       setIsAuthDialogOpen(false);
       setAuthError(null);

@@ -98,8 +98,11 @@ export async function discoverAndConfigureOllamaModel(
     settings.setValue(SettingScope.User, 'ollamaBaseUrl', ollamaBaseUrl);
     
     // Set defaults with comments for configuration values
-    if (!settings.merged.ollamaTimeout) {
-      settings.setValue(SettingScope.User, 'ollamaTimeout', 120); // Default: 2 minutes
+    if (!settings.merged.ollamaChatTimeout) {
+      settings.setValue(SettingScope.User, 'ollamaChatTimeout', 120); // Default: 2 minutes
+    }
+    if (!settings.merged.ollamaStreamingTimeout) {
+      settings.setValue(SettingScope.User, 'ollamaStreamingTimeout', 300); // Default: 5 minutes for streaming
     }
     if (!settings.merged.ollamaContextLimit) {
       settings.setValue(SettingScope.User, 'ollamaContextLimit', 2048); // Default: Conservative 2K context

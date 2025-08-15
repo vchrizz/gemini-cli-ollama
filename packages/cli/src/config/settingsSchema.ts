@@ -304,13 +304,22 @@ export const SETTINGS_SCHEMA = {
     description: 'Enable the Ollama Chat API for tool calling. When enabled, tools like shell commands will work properly. When disabled, Generate API is used (tools will not work).',
     showInDialog: true,
   },
-  ollamaTimeout: {
+  ollamaChatTimeout: {
     type: 'number',
-    label: 'Ollama Request Timeout (seconds)',
+    label: 'Ollama Chat API Timeout (seconds)',
     category: 'Ollama',
     requiresRestart: false,
     default: 120 as number, // Default: 2 minutes
-    description: 'Timeout for Ollama API requests in seconds. Adjust based on your model and hardware. Larger models may need higher values.',
+    description: 'Timeout for non-streaming Ollama Chat API requests in seconds. Used for single response queries.',
+    showInDialog: true,
+  },
+  ollamaStreamingTimeout: {
+    type: 'number',
+    label: 'Ollama Streaming Timeout (seconds)',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: 300 as number, // Default: 5 minutes for streaming
+    description: 'Timeout for Ollama streaming Chat API requests in seconds. Used for tool calling and continuous conversation flow.',
     showInDialog: true,
   },
   ollamaContextLimit: {

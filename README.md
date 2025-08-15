@@ -163,13 +163,23 @@ Ollama settings can be customized in your `~/.gemini/settings.json`:
 {
   "selectedAuthType": "ollama",
   "ollamaBaseUrl": "http://localhost:11434",
-  "ollamaModel": "llama2"
+  "ollamaModel": "llama2",
+  "ollamaChatTimeout": 120,
+  "ollamaStreamingTimeout": 300,
+  "ollamaContextLimit": 2048,
+  "ollamaEnableChatApi": true,
+  "ollamaDebugLogging": false
 }
 ```
 
 **Configuration options:**
 - `ollamaBaseUrl`: The Ollama server URL (default: `http://localhost:11434`)
 - `ollamaModel`: The model to use (auto-detected from available models)
+- `ollamaChatTimeout`: Timeout for non-streaming API requests in seconds (default: `120`)
+- `ollamaStreamingTimeout`: Timeout for streaming API requests and tool calling in seconds (default: `300`)
+- `ollamaContextLimit`: Context window size for requests (default: `2048`, adjust based on model and hardware)
+- `ollamaEnableChatApi`: Enable Chat API for tool calling support (default: `true`)
+- `ollamaDebugLogging`: Enable detailed debug logging to file (default: `false`)
 
 For Google Workspace accounts and other authentication methods, see the [authentication guide](./docs/cli/authentication.md).
 

@@ -58,7 +58,8 @@ export type ContentGeneratorConfig = {
   proxy?: string | undefined;
   ollamaBaseUrl?: string;
   ollamaEnableChatApi?: boolean;
-  ollamaTimeout?: number;
+  ollamaChatTimeout?: number;
+  ollamaStreamingTimeout?: number;
   ollamaContextLimit?: number;
 };
 
@@ -80,7 +81,8 @@ export function createContentGeneratorConfig(
     proxy: config?.getProxy(),
     ollamaBaseUrl: config?.getOllamaBaseUrl(),
     ollamaEnableChatApi: config?.getOllamaEnableChatApi(),
-    ollamaTimeout: config?.getOllamaTimeout(),
+    ollamaChatTimeout: config?.getOllamaChatTimeout(),
+    ollamaStreamingTimeout: config?.getOllamaStreamingTimeout(),
     ollamaContextLimit: config?.getOllamaContextLimit(),
   };
 
@@ -173,7 +175,8 @@ export async function createContentGenerator(
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
       model: config.model,
       enableChatApi: config.ollamaEnableChatApi,
-      timeout: (config.ollamaTimeout || 120) * 1000, // Convert seconds to milliseconds  
+      timeout: (config.ollamaChatTimeout || 120) * 1000, // Convert seconds to milliseconds  
+      streamingTimeout: (config.ollamaStreamingTimeout || 300) * 1000, // Convert seconds to milliseconds
       contextLimit: config.ollamaContextLimit || 2048, // Default: Conservative 2K context
       debugLogging: gcConfig.getOllamaDebugLogging(), // Use Ollama-specific debug logging
     };

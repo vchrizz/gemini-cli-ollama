@@ -201,7 +201,8 @@ export interface ConfigParameters {
   ollamaBaseUrl?: string;
   ollamaModel?: string;
   ollamaEnableChatApi?: boolean;
-  ollamaTimeout?: number;
+  ollamaChatTimeout?: number;
+  ollamaStreamingTimeout?: number;
   ollamaContextLimit?: number;
   ollamaDebugLogging?: boolean;
 }
@@ -271,7 +272,8 @@ export class Config {
   private readonly ollamaBaseUrl: string | undefined;
   private readonly ollamaModel: string | undefined;
   private readonly ollamaEnableChatApi: boolean;
-  private readonly ollamaTimeout: number;
+  private readonly ollamaChatTimeout: number;
+  private readonly ollamaStreamingTimeout: number;
   private readonly ollamaContextLimit: number;
   private readonly ollamaDebugLogging: boolean;
   private initialized: boolean = false;
@@ -341,7 +343,8 @@ export class Config {
     this.ollamaBaseUrl = params.ollamaBaseUrl;
     this.ollamaModel = params.ollamaModel;
     this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
-    this.ollamaTimeout = params.ollamaTimeout ?? 120; // Default: 2 minutes
+    this.ollamaChatTimeout = params.ollamaChatTimeout ?? 120; // Default: 2 minutes
+    this.ollamaStreamingTimeout = params.ollamaStreamingTimeout ?? 300; // Default: 5 minutes for streaming
     this.ollamaContextLimit = params.ollamaContextLimit ?? 2048; // Default: Conservative 2K context
     this.ollamaDebugLogging = params.ollamaDebugLogging ?? false; // Default: Debug logging disabled
 
@@ -634,8 +637,12 @@ export class Config {
     return this.ollamaEnableChatApi;
   }
 
-  getOllamaTimeout(): number {
-    return this.ollamaTimeout;
+  getOllamaChatTimeout(): number {
+    return this.ollamaChatTimeout;
+  }
+
+  getOllamaStreamingTimeout(): number {
+    return this.ollamaStreamingTimeout;
   }
 
   getOllamaContextLimit(): number {
