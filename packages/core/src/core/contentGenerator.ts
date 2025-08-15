@@ -57,6 +57,9 @@ export type ContentGeneratorConfig = {
   authType?: AuthType | undefined;
   proxy?: string | undefined;
   ollamaBaseUrl?: string;
+  ollamaEnableChatApi?: boolean;
+  ollamaTimeout?: number;
+  ollamaContextLimit?: number;
 };
 
 export function createContentGeneratorConfig(
@@ -76,6 +79,9 @@ export function createContentGeneratorConfig(
     authType,
     proxy: config?.getProxy(),
     ollamaBaseUrl: config?.getOllamaBaseUrl(),
+    ollamaEnableChatApi: config?.getOllamaEnableChatApi(),
+    ollamaTimeout: config?.getOllamaTimeout(),
+    ollamaContextLimit: config?.getOllamaContextLimit(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -156,15 +162,27 @@ export async function createContentGenerator(
   }
 
   if (config.authType === AuthType.USE_OLLAMA) {
+    console.log('🚀 Creating OllamaContentGenerator with config:', {
+      authType: config.authType,
+      baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
+      model: config.model,
+      enableChatApi: config.ollamaEnableChatApi
+    });
+    
     const ollamaConfig = {
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
       model: config.model,
+      enableChatApi: config.ollamaEnableChatApi,
+      timeout: (config.ollamaTimeout || 120) * 1000, // Convert seconds to milliseconds  
+      contextLimit: config.ollamaContextLimit || 2048, // Default: Conservative 2K context
+      debugMode: gcConfig.getDebugMode(),
     };
     const ollamaGenerator = new OllamaContentGenerator(ollamaConfig);
     
     // Ensure context length is initialized synchronously
     await ollamaGenerator.ensureContextLengthInitialized();
     
+    console.log('✅ OllamaContentGenerator created and initialized');
     return new LoggingContentGenerator(ollamaGenerator, gcConfig);
   }
 

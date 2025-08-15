@@ -295,6 +295,33 @@ export const SETTINGS_SCHEMA = {
     description: 'The default model to use with Ollama.',
     showInDialog: true,
   },
+  ollamaEnableChatApi: {
+    type: 'boolean',
+    label: 'Enable Ollama Chat API for Tool Calling',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: true as boolean,
+    description: 'Enable the Ollama Chat API for tool calling. When enabled, tools like shell commands will work properly. When disabled, Generate API is used (tools will not work).',
+    showInDialog: true,
+  },
+  ollamaTimeout: {
+    type: 'number',
+    label: 'Ollama Request Timeout (seconds)',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: 120 as number, // Default: 2 minutes
+    description: 'Timeout for Ollama API requests in seconds. Adjust based on your model and hardware. Larger models may need higher values.',
+    showInDialog: true,
+  },
+  ollamaContextLimit: {
+    type: 'number',
+    label: 'Ollama Context Window Size',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: 2048 as number, // Default: Conservative 2K context to prevent GPU hangs
+    description: 'Context window size for Ollama requests. Lower values prevent GPU hangs but limit conversation length. Higher values allow longer context but may cause stability issues.',
+    showInDialog: true,
+  },
   useExternalAuth: {
     type: 'boolean',
     label: 'Use External Auth',

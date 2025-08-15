@@ -495,6 +495,7 @@ export async function loadCliConfig(
     interactive,
     ollamaBaseUrl: settings.ollamaBaseUrl,
     ollamaModel: settings.ollamaModel,
+    ollamaEnableChatApi: settings.ollamaEnableChatApi,
   });
 }
 

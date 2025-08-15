@@ -93,9 +93,20 @@ export async function discoverAndConfigureOllamaModel(
     const firstModel = models[0];
     const modelName = firstModel.name;
     
-    // Save both the model and base URL to settings
+    // Save model, base URL, and default configuration to settings
     settings.setValue(SettingScope.User, 'ollamaModel', modelName);
     settings.setValue(SettingScope.User, 'ollamaBaseUrl', ollamaBaseUrl);
+    
+    // Set defaults with comments for configuration values
+    if (!settings.merged.ollamaTimeout) {
+      settings.setValue(SettingScope.User, 'ollamaTimeout', 120); // Default: 2 minutes
+    }
+    if (!settings.merged.ollamaContextLimit) {
+      settings.setValue(SettingScope.User, 'ollamaContextLimit', 2048); // Default: Conservative 2K context
+    }
+    if (settings.merged.ollamaEnableChatApi === undefined) {
+      settings.setValue(SettingScope.User, 'ollamaEnableChatApi', true); // Default: Enable Chat API for tool calling
+    }
     
     return {
       success: true,

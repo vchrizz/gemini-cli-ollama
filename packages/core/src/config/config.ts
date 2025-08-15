@@ -201,9 +201,8 @@ export interface ConfigParameters {
   ollamaBaseUrl?: string;
   ollamaModel?: string;
   ollamaEnableChatApi?: boolean;
-  ollamaGpuHangProtection?: boolean;
-  ollamaModelSizeThreshold?: number;
-  ollamaDebugLogging?: boolean;
+  ollamaTimeout?: number;
+  ollamaContextLimit?: number;
 }
 
 export class Config {
@@ -271,9 +270,8 @@ export class Config {
   private readonly ollamaBaseUrl: string | undefined;
   private readonly ollamaModel: string | undefined;
   private readonly ollamaEnableChatApi: boolean;
-  private readonly ollamaGpuHangProtection: boolean;
-  private readonly ollamaModelSizeThreshold: number;
-  private readonly ollamaDebugLogging: boolean;
+  private readonly ollamaTimeout: number;
+  private readonly ollamaContextLimit: number;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -340,10 +338,9 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.ollamaBaseUrl = params.ollamaBaseUrl;
     this.ollamaModel = params.ollamaModel;
-    this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? false;
-    this.ollamaGpuHangProtection = params.ollamaGpuHangProtection ?? true;
-    this.ollamaModelSizeThreshold = params.ollamaModelSizeThreshold ?? 30;
-    this.ollamaDebugLogging = params.ollamaDebugLogging ?? false;
+    this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
+    this.ollamaTimeout = params.ollamaTimeout ?? 120; // Default: 2 minutes
+    this.ollamaContextLimit = params.ollamaContextLimit ?? 2048; // Default: Conservative 2K context
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -634,16 +631,12 @@ export class Config {
     return this.ollamaEnableChatApi;
   }
 
-  getOllamaGpuHangProtection(): boolean {
-    return this.ollamaGpuHangProtection;
+  getOllamaTimeout(): number {
+    return this.ollamaTimeout;
   }
 
-  getOllamaModelSizeThreshold(): number {
-    return this.ollamaModelSizeThreshold;
-  }
-
-  getOllamaDebugLogging(): boolean {
-    return this.ollamaDebugLogging;
+  getOllamaContextLimit(): number {
+    return this.ollamaContextLimit;
   }
 
   getWorkingDir(): string {

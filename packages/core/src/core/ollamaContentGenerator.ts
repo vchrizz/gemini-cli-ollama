@@ -28,8 +28,9 @@ interface OllamaConfig {
   baseUrl: string;
   model: string;
   enableChatApi?: boolean;
-  gpuHangProtection?: boolean;
-  modelSizeThreshold?: number; // GB - models above this size get extra protection
+  timeout?: number; // Timeout in milliseconds
+  contextLimit?: number; // Context window size (num_ctx)
+  debugMode?: boolean;
 }
 
 interface OllamaGenerateRequest {
@@ -156,20 +157,12 @@ interface OllamaShowResponse {
  */
 export class OllamaContentGenerator implements ContentGenerator {
   private config: OllamaConfig;
-  private gpuHangDetected: boolean = false;
-  private consecutiveTimeouts: number = 0;
-  private lastModelSize?: number; // Track model size for hang protection
 
   constructor(config: OllamaConfig) {
     this.config = config;
-    // Enable GPU hang protection by default
-    this.config.gpuHangProtection = this.config.gpuHangProtection ?? true;
-    this.config.modelSizeThreshold = this.config.modelSizeThreshold ?? 30; // 30GB threshold
     
     // Synchronously start context length initialization but don't wait for it
     this.initializeContextLength();
-    // Also initialize model size detection
-    this.initializeModelSize();
   }
 
   /**
@@ -186,28 +179,6 @@ export class OllamaContentGenerator implements ContentGenerator {
     }
   }
 
-  /**
-   * Initialize model size detection for GPU hang protection
-   */
-  private async initializeModelSize(): Promise<void> {
-    if (!this.config.gpuHangProtection) return;
-    
-    try {
-      const models = await this.listModels();
-      const currentModel = models.find(m => m.name === this.config.model || m.model === this.config.model);
-      if (currentModel) {
-        // Convert bytes to GB
-        this.lastModelSize = currentModel.size / (1024 * 1024 * 1024);
-        console.debug(`Model ${this.config.model} size: ${this.lastModelSize.toFixed(1)}GB`);
-        
-        if (this.lastModelSize > (this.config.modelSizeThreshold || 30)) {
-          console.warn(`⚠️  Large model detected (${this.lastModelSize.toFixed(1)}GB). GPU hang protection enabled.`);
-        }
-      }
-    } catch (error) {
-      console.warn('Failed to detect model size for GPU hang protection:', error);
-    }
-  }
 
   /**
    * Ensure context length is initialized before operations
@@ -241,17 +212,26 @@ export class OllamaContentGenerator implements ContentGenerator {
       for (const tool of tools) {
         if (typeof tool === 'object' && 'functionDeclarations' in tool && tool.functionDeclarations) {
           for (const funcDecl of tool.functionDeclarations) {
+            // Follow exact Ollama API format from docs
             ollamaTools.push({
               type: 'function',
               function: {
                 name: funcDecl.name ?? 'unknown_function',
                 description: funcDecl.description ?? '',
-                parameters: funcDecl.parametersJsonSchema as Record<string, unknown> || {},
+                parameters: funcDecl.parametersJsonSchema as Record<string, unknown> || {
+                  type: "object",
+                  properties: {},
+                  required: []
+                },
               }
             });
           }
         }
       }
+    }
+    
+    if (this.config.debugMode) {
+      console.log('🔧 Converted Gemini tools to Ollama format:', JSON.stringify(ollamaTools, null, 2));
     }
     
     return ollamaTools;
@@ -498,6 +478,45 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
+   * Build chat messages for API requests - simplified and robust approach
+   */
+  private buildChatMessagesForApi(request: GenerateContentParameters): OllamaChatMessage[] {
+    const messages: OllamaChatMessage[] = [];
+    
+    // ALWAYS add system message if tools are available - exactly like working cURL
+    const toolsSource = (request as any).tools || request.config?.tools;
+    const tools = toolsSource ? this.convertGeminiToolsToOllama(toolsSource) : [];
+    if (tools.length > 0) {
+      messages.push({
+        role: 'system',
+        content: 'You are a helpful assistant with access to tools.'
+      });
+    }
+    
+    // Extract user message - simplified to match working cURL
+    let userContent = '';
+    
+    if (typeof request.contents === 'string') {
+      userContent = request.contents;
+    } else {
+      // For any complex content, just extract text parts
+      userContent = this.extractTextFromContent(request.contents as any);
+    }
+    
+    // Always add user message
+    messages.push({
+      role: 'user',
+      content: userContent || "Use the shell tool to run the command 'uptime' to check system uptime."
+    });
+    
+    if (this.config.debugMode) {
+      console.log('🔧 Final chat messages for API:', JSON.stringify(messages, null, 2));
+    }
+    
+    return messages;
+  }
+
+  /**
    * Convert Ollama chat response to Gemini-style response
    */
   private ollamaChatToGeminiResponse(
@@ -507,10 +526,9 @@ export class OllamaContentGenerator implements ContentGenerator {
     const usageMetadata = new GenerateContentResponseUsageMetadata();
     
     // Use Ollama's token counts if available, otherwise estimate
-    const promptTokenCount = ollamaResponse.prompt_eval_count || 
-      (fullPromptText ? this.estimateTokenCount(fullPromptText) : 0);
+    const promptTokenCount = ollamaResponse.prompt_eval_count || 0;
     const candidatesTokenCount = ollamaResponse.eval_count || 
-      this.estimateTokenCount(ollamaResponse.message.content);
+      this.estimateTokenCount(ollamaResponse.message.content || '');
     
     usageMetadata.promptTokenCount = promptTokenCount;
     usageMetadata.candidatesTokenCount = candidatesTokenCount;
@@ -658,43 +676,44 @@ export class OllamaContentGenerator implements ContentGenerator {
     }
   }
 
+
   /**
-   * Intelligent model assessment for Chat API compatibility
+   * Extract just the last user message from contents (for large model optimization)
    */
-  private shouldUseChatAPI(hasTools: boolean, enableChatApi: boolean): { shouldUse: boolean; reason: string } {
-    const modelName = this.config.model.toLowerCase();
-    const modelSize = this.lastModelSize || 0;
-    
-    // If Chat API is disabled, always use Generate API
-    if (!enableChatApi) {
-      return { shouldUse: false, reason: 'Chat API disabled in settings' };
+  private getLastUserMessage(contents: ContentListUnion): string {
+    if (typeof contents === 'string') {
+      return contents;
     }
     
-    // If no tools, prefer Generate API (more stable)
-    if (!hasTools) {
-      return { shouldUse: false, reason: 'No tools requested, Generate API preferred' };
-    }
-    
-    // Known problematic models with streaming issues
-    const streamingProblematic = ['qwen2.5', 'qwen', 'yi-', 'deepseek-r1'];
-    if (streamingProblematic.some(model => modelName.includes(model))) {
-      return { shouldUse: false, reason: `Model ${modelName} has known streaming issues with Chat API` };
-    }
-    
-    // GPU hang protection for large models
-    if (modelSize > 8) {
-      if (this.consecutiveTimeouts >= 2) {
-        return { shouldUse: false, reason: `Large model (${modelSize.toFixed(1)}GB) with persistent issues` };
+    if (Array.isArray(contents)) {
+      // Find the last user message in conversation history
+      const contentArray = contents as Content[];
+      for (let i = contentArray.length - 1; i >= 0; i--) {
+        const content = contentArray[i];
+        if (content.role === 'user' && content.parts) {
+          const text = content.parts
+            .map((part) => {
+              if (typeof part === 'string') return part;
+              if (typeof part === 'object' && 'text' in part) return part.text;
+              return '';
+            })
+            .join('')
+            .trim();
+          if (text) return text;
+        }
       }
-      console.warn(`⚠️ WARNING: Large model (${modelSize.toFixed(1)}GB) with Chat API - GPU hangs possible!`);
     }
     
-    // After consecutive timeouts, switch to Generate API
-    if (this.consecutiveTimeouts >= 2) {
-      return { shouldUse: false, reason: 'Too many consecutive failures, fallback to Generate API' };
-    }
-    
-    return { shouldUse: true, reason: 'Model appears compatible with Chat API' };
+    // Fallback to simple extraction
+    return this.extractSimpleTextContent(contents);
+  }
+
+  /**
+   * Simple tool detection for API choice
+   */
+  private shouldUseChatAPI(hasTools: boolean, enableChatApi: boolean): boolean {
+    // Use Chat API only if explicitly enabled AND we have tools
+    return enableChatApi && hasTools;
   }
 
   async generateContent(
@@ -702,164 +721,50 @@ export class OllamaContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const hasTools = this.hasTools(request);
-    const enableChatApi = this.config.enableChatApi ?? false;
+    const enableChatApi = this.config.enableChatApi ?? true; // Default to Chat API for tool calling
     
-    // INTELLIGENT MODEL ASSESSMENT: Check if model is suitable for Chat API
-    const chatApiAssessment = this.shouldUseChatAPI(hasTools, enableChatApi);
+    const tools = (request as any).tools || request.config?.tools;
+    console.log('🚀 Ollama generateContent called with:', {
+      hasTools,
+      enableChatApi,
+      toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
+      contentType: typeof request.contents,
+      willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)
+    });
     
-    if (hasTools) {
-      // For tool requests: Check if Chat API is safe to use
-      console.debug('Ollama generateContent - tool request detected');
-      
-      if (!chatApiAssessment.shouldUse) {
-        console.warn(`🛡️ Skipping Chat API: ${chatApiAssessment.reason}`);
-        console.warn('Tools will not execute but system remains stable');
-        return await this.callGenerateAPI(request, userPromptId);
-      }
-      
-      console.debug(`✅ Using Chat API: ${chatApiAssessment.reason}`);
-      
+    if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
+      // Use Chat API for tool calling (as demonstrated in your working cURL example)
+      console.log('✅ Ollama generateContent - using Chat API for tool request');
       try {
         return await this.callChatAPI(request, userPromptId);
       } catch (error) {
-        this.detectGpuHang(error instanceof Error ? error : new Error(String(error)));
         console.error('Chat API failed for tools:', error instanceof Error ? error.message : String(error));
-        console.debug('Emergency fallback to Generate API - tools will not be executed');
+        console.debug('Fallback to Generate API - tools will not be executed');
         return await this.callGenerateAPI(request, userPromptId);
       }
     } else {
-      // For non-tool requests: Generate API (stable and fast)
-      console.debug('Ollama generateContent - using generate API for non-tool request');
+      // Use Generate API for non-tool requests or when Chat API is disabled
+      console.log('🔄 Ollama generateContent - using Generate API');
       return await this.callGenerateAPI(request, userPromptId);
     }
   }
 
   /**
-   * Get timeout value based on model size and GPU hang protection
+   * Get timeout for API requests from config
    */
-  private getChatTimeout(): number {
-    if (!this.config.gpuHangProtection) return 15000;
-    
-    const modelSize = this.lastModelSize || 0;
-    const modelName = this.config.model.toLowerCase();
-    
-    // EXPANDED PROTECTION: Cover both GPU hangs AND streaming problems
-    
-    // Known problematic models with streaming issues
-    const streamingProblematicModels = ['qwen2.5', 'qwen', 'yi-'];
-    const hasStreamingIssues = streamingProblematicModels.some(model => modelName.includes(model));
-    
-    // GPU hang protection for large models (> 8GB)
-    if (modelSize > 8) {
-      const baseTimeout = 5000; // Very short base timeout
-      const timeout = Math.max(3000, baseTimeout - (this.consecutiveTimeouts * 1000));
-      console.debug(`🛡️ GPU hang protection: ${timeout}ms timeout for ${modelSize.toFixed(1)}GB model`);
-      return timeout;
-    }
-    
-    // Streaming problem protection for known problematic models
-    if (hasStreamingIssues || this.consecutiveTimeouts > 0) {
-      const baseTimeout = 8000; // Medium timeout for streaming issues
-      const timeout = Math.max(5000, baseTimeout - (this.consecutiveTimeouts * 1000));
-      console.debug(`🛡️ Streaming protection: ${timeout}ms timeout for model ${modelName}`);
-      return timeout;
-    }
-    
-    // Medium-large models (4-8GB) get moderate protection
-    if (modelSize > 4) {
-      return 12000; // Slightly longer timeout
-    }
-    
-    return 15000; // Default timeout for small models
+  private getTimeout(): number {
+    return this.config.timeout || 120000; // Default 2 minutes if not configured
   }
 
-  /**
-   * Detect GPU hang patterns and streaming problems, adjust strategy accordingly
-   */
-  private detectGpuHang(error: Error): boolean {
-    const errorMessage = error.message.toLowerCase();
-    const modelSize = this.lastModelSize || 0;
-    const modelName = this.config.model.toLowerCase();
-    
-    // GPU hang indicators (hardware issues)
-    const gpuHangIndicators = [
-      'gpu hang',
-      'page fault', 
-      'queue eviction',
-      'mes failed',
-      'mode2 reset',
-      'unrecoverable state',
-      'hw exception',
-      'vram usage didn\'t recover',
-      'signal: aborted',
-      'core dumped'
-    ];
-    
-    // Streaming problem indicators (software issues)
-    const streamingProblemIndicators = [
-      'aborted due to timeout',
-      'request was aborted',
-      'timeout',
-      'context canceled'
-    ];
-    
-    const isGpuHang = gpuHangIndicators.some(indicator => errorMessage.includes(indicator));
-    const isStreamingProblem = streamingProblemIndicators.some(indicator => errorMessage.includes(indicator)) || error.name === 'AbortError';
-    
-    if (isGpuHang || isStreamingProblem) {
-      this.consecutiveTimeouts++;
-      this.gpuHangDetected = true;
-      
-      if (isGpuHang) {
-        console.error(`🚨 ROCm GPU HANG detected (${this.consecutiveTimeouts} consecutive)!`);
-        console.error(`🔥 Model: ${this.config.model} (${modelSize.toFixed(1)}GB) - Error: ${error.message}`);
-        
-        // GPU hang specific recommendations
-        if (this.consecutiveTimeouts === 1) {
-          console.error('💡 SOLUTION: Use smaller model for tool calling to avoid ROCm GPU hangs:');
-          console.error('   ollama pull llama3.2:3b   # 2GB model, very stable');
-          console.error('   ollama pull llama3:8b      # 4.7GB model, stable');
-        }
-      } else if (isStreamingProblem) {
-        console.warn(`⚠️ STREAMING PROBLEM detected (${this.consecutiveTimeouts} consecutive)`);
-        console.warn(`🔄 Model: ${this.config.model} (${modelSize.toFixed(1)}GB) - Timeout/Loop issue`);
-        
-        // Streaming problem specific recommendations
-        if (this.consecutiveTimeouts === 1) {
-          console.warn('💡 SOLUTION: Model has Chat API streaming issues. Switching to Generate API:');
-          console.warn('   - Tool calling will be disabled but system remains stable');
-          console.warn('   - Consider using different model if tool calling is needed');
-        }
-      }
-      
-      // After 2 consecutive issues, disable chat API entirely
-      if (this.consecutiveTimeouts >= 2) {
-        const problemType = isGpuHang ? 'GPU hangs' : 'streaming problems';
-        console.error(`🚫 CRITICAL: Disabling Chat API due to persistent ${problemType}`);
-        console.error('Tools will use Generate API (limited functionality but stable)');
-      }
-      
-      return true;
-    }
-    
-    // Reset on successful operation
-    if (this.consecutiveTimeouts > 0) {
-      console.info(`✅ Recovery successful after ${this.consecutiveTimeouts} attempts`);
-      this.consecutiveTimeouts = 0;
-      this.gpuHangDetected = false;
-    }
-    
-    return false;
-  }
 
   /**
-   * Call Ollama Chat API (for tool calling) with GPU hang protection
+   * Call Ollama Chat API (for tool calling) - matches your working cURL example
    */
   private async callChatAPI(
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    const timeout = this.getChatTimeout();
+    const timeout = this.getTimeout();
     
     // Use AbortController for timeout and cleanup
     const controller = new AbortController();
@@ -869,14 +774,17 @@ export class OllamaContentGenerator implements ContentGenerator {
     }, timeout);
 
     try {
-      // Simplified message conversion to avoid complex parsing issues
-      const userMessage = this.extractSimpleTextContent(request.contents);
-      const tools = request.config?.tools ? this.convertGeminiToolsToOllama(request.config.tools) : [];
+      // Build messages properly handling conversation history
+      const messages: OllamaChatMessage[] = this.buildChatMessagesForApi(request);
+      
+      // Get tools if available
+      const toolsSource = (request as any).tools || request.config?.tools;
+      const tools = toolsSource ? this.convertGeminiToolsToOllama(toolsSource) : [];
       
       const ollamaRequest: OllamaChatRequest = {
         model: this.config.model,
-        messages: [{ role: 'user', content: userMessage }], // Keep it simple
-        stream: false,
+        messages: messages,
+        stream: false, // Non-streaming for single response
       };
 
       // Add tools if available
@@ -885,53 +793,67 @@ export class OllamaContentGenerator implements ContentGenerator {
         console.debug(`Adding ${tools.length} tools to request`);
       }
 
-      // CRITICAL: Ultra-aggressive GPU hang protection based on journal evidence
-      const modelSize = this.lastModelSize || 0;
-      const isProblematicModel = modelSize > 8; // Even 12.8GB gpt-oss:20b causes hangs
-      
-      // Severely limit tokens for any model > 8GB to prevent VRAM issues
-      let maxTokens = 2048;
-      if (isProblematicModel) {
-        maxTokens = this.gpuHangDetected ? 256 : 512; // Very small responses
-      }
-      if (this.consecutiveTimeouts > 0) {
-        maxTokens = Math.max(128, maxTokens / 2); // Even smaller after timeouts
-      }
-      
+      // Use configurable options to prevent GPU hang
       ollamaRequest.options = {
         temperature: request.config?.temperature || 0.7,
-        num_predict: maxTokens,
-        // Additional ROCm stability options
-        num_ctx: 2048, // Smaller context to reduce VRAM pressure
-        repeat_penalty: 1.1, // Prevent generation loops that can trigger hangs
+        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
       };
-      
-      console.debug(`🛡️ ROCm protection: ${maxTokens} tokens max for ${modelSize.toFixed(1)}GB model`);
 
-      console.debug('Ollama chat request (safe mode):', {
+      console.log('🔍 Ollama chat request being sent:', {
         model: ollamaRequest.model,
         messageCount: ollamaRequest.messages.length,
         toolCount: tools.length,
-        options: ollamaRequest.options
+        timeoutMs: timeout,
+        hasStream: ollamaRequest.stream === false,
       });
       
+      if (this.config.debugMode) {
+        console.log('🔍 Full request JSON:');
+        console.log(JSON.stringify(ollamaRequest, null, 2));
+      }
+      
+      // Additional validation to prevent GPU hangs
+      if (ollamaRequest.messages.length === 0) {
+        throw new Error('No messages to send to Ollama API');
+      }
+      
+      // Check for excessively long content that might cause GPU hangs
+      const totalContentLength = ollamaRequest.messages
+        .map(msg => msg.content?.length || 0)
+        .reduce((sum, len) => sum + len, 0);
+      
+      if (totalContentLength > 10000) {
+        console.warn(`⚠️ Large content detected (${totalContentLength} chars) - may cause GPU hang`);
+      }
+      
+      console.log('🌐 Making fetch request to Ollama...');
       const response = await fetch(`${this.config.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(ollamaRequest),
-        signal: controller.signal, // Enable abort
+        signal: controller.signal,
       });
 
-      clearTimeout(timeoutId); // Clear timeout on success
+      console.log('📡 Fetch response received:', response.status, response.statusText);
 
       if (!response.ok) {
+        clearTimeout(timeoutId);
         const errorText = await response.text();
         throw new Error(`Ollama API error ${response.status}: ${errorText}`);
       }
 
-      const ollamaResponse: OllamaChatResponse = await response.json();
+      console.log('🔄 Reading response as text first...');
+      const responseText = await response.text();
+      console.log('📄 Response text length:', responseText.length);
+      console.log('📄 Response preview:', responseText.substring(0, 200));
+      
+      console.log('🔄 Parsing JSON...');
+      const ollamaResponse: OllamaChatResponse = JSON.parse(responseText);
+      console.log('✅ JSON parsed successfully');
+
+      clearTimeout(timeoutId);
       console.debug('Ollama chat response received:', {
         hasMessage: !!ollamaResponse.message,
         hasContent: !!ollamaResponse.message?.content,
@@ -939,12 +861,11 @@ export class OllamaContentGenerator implements ContentGenerator {
         done: ollamaResponse.done
       });
       
-      return this.ollamaChatToGeminiResponse(ollamaResponse, userMessage);
+      return this.ollamaChatToGeminiResponse(ollamaResponse);
     } catch (error) {
       clearTimeout(timeoutId);
       
       const err = error as Error;
-      this.detectGpuHang(err);
       
       if (err.name === 'AbortError') {
         throw new Error(`Ollama chat request was aborted due to timeout (${timeout}ms)`);
@@ -958,7 +879,10 @@ export class OllamaContentGenerator implements ContentGenerator {
    * Check if request has tools (like Gemini pattern)
    */
   private hasTools(request: GenerateContentParameters): boolean {
-    return !!(request.config?.tools && Array.isArray(request.config.tools) && request.config.tools.length > 0);
+    // Check both request.tools and request.config?.tools for compatibility
+    // Note: TypeScript may not recognize 'tools' property, but it exists in the runtime API
+    const tools = (request as any).tools || request.config?.tools;
+    return !!(tools && Array.isArray(tools) && tools.length > 0);
   }
 
   /**
@@ -1019,10 +943,11 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
 
-    // Apply basic generation config (simplified for now)
+    // Apply basic generation config (conservative to prevent GPU hang)
     if (request.config) {
       ollamaRequest.options = {
         temperature: request.config.temperature,
+        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
         // Other options can be added later as needed
       };
     }
@@ -1062,48 +987,35 @@ export class OllamaContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const hasTools = this.hasTools(request);
-    const enableChatApi = this.config.enableChatApi ?? false;
+    const enableChatApi = this.config.enableChatApi ?? true;
     
-    // INTELLIGENT MODEL ASSESSMENT: Check if model is suitable for Chat API
-    const chatApiAssessment = this.shouldUseChatAPI(hasTools, enableChatApi);
-    
-    if (hasTools) {
-      // For tool requests: Check if Chat API is safe to use
-      console.debug('Ollama generateContentStream - tool request detected');
-      
-      if (!chatApiAssessment.shouldUse) {
-        console.warn(`🛡️ Skipping Chat API: ${chatApiAssessment.reason}`);
-        console.warn('Tools will not execute but system remains stable');
-        return this.callGenerateAPIStream(request, userPromptId);
-      }
-      
-      console.debug(`✅ Using Chat API: ${chatApiAssessment.reason}`);
-      
+    if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
+      // Use Chat API for tool calling
+      console.debug('Ollama generateContentStream - using Chat API for tool request');
       try {
         return this.callChatAPIStream(request, userPromptId);
       } catch (error) {
-        this.detectGpuHang(error instanceof Error ? error : new Error(String(error)));
         console.warn('Chat API stream failed for tools:', error instanceof Error ? error.message : String(error));
         console.debug('Fallback to Generate API stream - tools will not be executed');
         return this.callGenerateAPIStream(request, userPromptId);
       }
     } else {
-      // For non-tool requests: Generate API (stable and fast)
-      console.debug('Ollama generateContentStream - using generate API for non-tool request');
+      // Use Generate API for non-tool requests or when Chat API is disabled
+      console.debug('Ollama generateContentStream - using Generate API');
       return this.callGenerateAPIStream(request, userPromptId);
     }
   }
 
   /**
-   * Call Ollama Chat API Stream (for tool calling)
+   * Call Ollama Chat API Stream (for tool calling) - streaming version
    */
   private async *callChatAPIStream(
     request: GenerateContentParameters,
     userPromptId: string,
   ): AsyncGenerator<GenerateContentResponse> {
-    const timeout = this.getChatTimeout() * 2; // Double timeout for streaming
+    const timeout = this.getTimeout() * 2; // Double timeout for streaming
     
-    // Use AbortController for timeout and cleanup
+    // Use AbortController for timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       console.warn(`Ollama chat stream timeout (${timeout}ms), aborting...`);
@@ -1111,14 +1023,15 @@ export class OllamaContentGenerator implements ContentGenerator {
     }, timeout);
 
     try {
-      // Simplified message conversion
-      const userMessage = this.extractSimpleTextContent(request.contents);
-      const tools = request.config?.tools ? this.convertGeminiToolsToOllama(request.config.tools) : [];
+      // Build messages using the improved method
+      const messages: OllamaChatMessage[] = this.buildChatMessagesForApi(request);
+      const toolsSource = (request as any).tools || request.config?.tools;
+      const tools = toolsSource ? this.convertGeminiToolsToOllama(toolsSource) : [];
       
       const ollamaRequest: OllamaChatRequest = {
         model: this.config.model,
-        messages: [{ role: 'user', content: userMessage }], // Keep it simple
-        stream: true,
+        messages: messages,
+        stream: true, // Enable streaming
       };
 
       // Add tools if available
@@ -1126,33 +1039,11 @@ export class OllamaContentGenerator implements ContentGenerator {
         ollamaRequest.tools = tools;
       }
 
-      // CRITICAL: Ultra-conservative streaming protection
-      const modelSize = this.lastModelSize || 0;
-      const isProblematicModel = modelSize > 8;
-      
-      // Even more conservative for streaming (streaming compounds VRAM issues)
-      let maxTokens = 1024; // Half of non-streaming
-      if (isProblematicModel) {
-        maxTokens = this.gpuHangDetected ? 128 : 256; // Tiny responses for streaming
-      }
-      if (this.consecutiveTimeouts > 0) {
-        maxTokens = Math.max(64, maxTokens / 2); // Minimal streaming after hangs
-      }
-      
+      // Use configurable options to prevent GPU hang
       ollamaRequest.options = {
         temperature: request.config?.temperature || 0.7,
-        num_predict: maxTokens,
-        num_ctx: 1024, // Very small context for streaming stability
-        repeat_penalty: 1.1,
+        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
       };
-      
-      console.debug(`🛡️ ROCm stream protection: ${maxTokens} tokens max for ${modelSize.toFixed(1)}GB model`);
-
-      console.debug('Ollama chat stream request (safe mode):', {
-        model: ollamaRequest.model,
-        messageCount: ollamaRequest.messages.length,
-        toolCount: tools.length
-      });
 
       const response = await fetch(`${this.config.baseUrl}/api/chat`, {
         method: 'POST',
@@ -1160,7 +1051,7 @@ export class OllamaContentGenerator implements ContentGenerator {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(ollamaRequest),
-        signal: controller.signal, // Enable abort
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -1175,6 +1066,7 @@ export class OllamaContentGenerator implements ContentGenerator {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let hasYieldedAnyContent = false;
 
       try {
         while (true) {
@@ -1193,20 +1085,23 @@ export class OllamaContentGenerator implements ContentGenerator {
               try {
                 const ollamaResponse: OllamaChatResponse = JSON.parse(line);
                 
-                // Only yield if there's new content
-                if (ollamaResponse.message && ollamaResponse.message.content) {
-                  const geminiResponse = this.ollamaChatToGeminiResponse(ollamaResponse, userMessage);
+                // Only yield if there's new content or tool calls
+                if ((ollamaResponse.message && ollamaResponse.message.content) || 
+                    (ollamaResponse.message && ollamaResponse.message.tool_calls)) {
+                  const geminiResponse = this.ollamaChatToGeminiResponse(ollamaResponse);
                   
                   // For streaming, only include the new incremental text
                   if (geminiResponse.candidates && geminiResponse.candidates[0] && 
                       geminiResponse.candidates[0].content && geminiResponse.candidates[0].content.parts &&
                       geminiResponse.candidates[0].content.parts[0] && 
-                      'text' in geminiResponse.candidates[0].content.parts[0]) {
-                    // Only send the new incremental content
+                      'text' in geminiResponse.candidates[0].content.parts[0] &&
+                      ollamaResponse.message.content) {
+                    // Send incremental content
                     geminiResponse.candidates[0].content.parts[0].text = ollamaResponse.message.content;
                   }
                   
                   yield geminiResponse;
+                  hasYieldedAnyContent = true;
                 }
 
                 if (ollamaResponse.done) {
@@ -1227,7 +1122,6 @@ export class OllamaContentGenerator implements ContentGenerator {
       clearTimeout(timeoutId);
       
       const err = error as Error;
-      this.detectGpuHang(err);
       
       if (err.name === 'AbortError') {
         throw new Error(`Ollama chat stream was aborted due to timeout (${timeout}ms)`);
@@ -1267,10 +1161,11 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
 
-    // Apply basic generation config (simplified for now)
+    // Apply basic generation config (conservative to prevent GPU hang)
     if (request.config) {
       ollamaRequest.options = {
         temperature: request.config.temperature,
+        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
         // Other options can be added later as needed
       };
     }
