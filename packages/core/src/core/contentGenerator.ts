@@ -175,7 +175,7 @@ export async function createContentGenerator(
       enableChatApi: config.ollamaEnableChatApi,
       timeout: (config.ollamaTimeout || 120) * 1000, // Convert seconds to milliseconds  
       contextLimit: config.ollamaContextLimit || 2048, // Default: Conservative 2K context
-      debugMode: gcConfig.getDebugMode(),
+      debugLogging: gcConfig.getOllamaDebugLogging(), // Use Ollama-specific debug logging
     };
     const ollamaGenerator = new OllamaContentGenerator(ollamaConfig);
     

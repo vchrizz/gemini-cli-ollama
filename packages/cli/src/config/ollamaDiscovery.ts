@@ -107,6 +107,9 @@ export async function discoverAndConfigureOllamaModel(
     if (settings.merged.ollamaEnableChatApi === undefined) {
       settings.setValue(SettingScope.User, 'ollamaEnableChatApi', true); // Default: Enable Chat API for tool calling
     }
+    if (settings.merged.ollamaDebugLogging === undefined) {
+      settings.setValue(SettingScope.User, 'ollamaDebugLogging', false); // Default: Debug logging disabled for performance
+    }
     
     return {
       success: true,

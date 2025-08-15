@@ -322,6 +322,15 @@ export const SETTINGS_SCHEMA = {
     description: 'Context window size for Ollama requests. Lower values prevent GPU hangs but limit conversation length. Higher values allow longer context but may cause stability issues.',
     showInDialog: true,
   },
+  ollamaDebugLogging: {
+    type: 'boolean',
+    label: 'Ollama Debug Logging',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: false as boolean, // Default: Debug logging disabled
+    description: 'Enable debug logging to ./debug.log file for troubleshooting Ollama integration issues. Only enable when needed as it may impact performance.',
+    showInDialog: true,
+  },
   useExternalAuth: {
     type: 'boolean',
     label: 'Use External Auth',

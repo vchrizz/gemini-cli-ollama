@@ -203,6 +203,7 @@ export interface ConfigParameters {
   ollamaEnableChatApi?: boolean;
   ollamaTimeout?: number;
   ollamaContextLimit?: number;
+  ollamaDebugLogging?: boolean;
 }
 
 export class Config {
@@ -272,6 +273,7 @@ export class Config {
   private readonly ollamaEnableChatApi: boolean;
   private readonly ollamaTimeout: number;
   private readonly ollamaContextLimit: number;
+  private readonly ollamaDebugLogging: boolean;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -341,6 +343,7 @@ export class Config {
     this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
     this.ollamaTimeout = params.ollamaTimeout ?? 120; // Default: 2 minutes
     this.ollamaContextLimit = params.ollamaContextLimit ?? 2048; // Default: Conservative 2K context
+    this.ollamaDebugLogging = params.ollamaDebugLogging ?? false; // Default: Debug logging disabled
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -637,6 +640,10 @@ export class Config {
 
   getOllamaContextLimit(): number {
     return this.ollamaContextLimit;
+  }
+
+  getOllamaDebugLogging(): boolean {
+    return this.ollamaDebugLogging || false; // Default: false if not set
   }
 
   getWorkingDir(): string {

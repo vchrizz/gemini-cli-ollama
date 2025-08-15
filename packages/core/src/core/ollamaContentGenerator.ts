@@ -30,7 +30,7 @@ interface OllamaConfig {
   enableChatApi?: boolean;
   timeout?: number; // Timeout in milliseconds
   contextLimit?: number; // Context window size (num_ctx)
-  debugMode?: boolean;
+  debugLogging?: boolean; // Enable debug logging to file
 }
 
 interface OllamaGenerateRequest {
@@ -230,7 +230,7 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
     
-    if (this.config.debugMode) {
+    if (this.config.debugLogging) {
       console.log('🔧 Converted Gemini tools to Ollama format:', JSON.stringify(ollamaTools, null, 2));
     }
     
@@ -496,20 +496,66 @@ export class OllamaContentGenerator implements ContentGenerator {
     // Extract user message - simplified to match working cURL
     let userContent = '';
     
+    // Extract user content from request
     if (typeof request.contents === 'string') {
       userContent = request.contents;
+    } else if (Array.isArray(request.contents)) {
+      // Extract the LAST user message from conversation history
+      const contents = request.contents as Content[];
+      for (let i = contents.length - 1; i >= 0; i--) {
+        const content = contents[i];
+        if (content.role === 'user' && content.parts) {
+          const text = content.parts
+            .map((part) => {
+              if (typeof part === 'string') return part;
+              if (typeof part === 'object' && 'text' in part) return part.text;
+              return '';
+            })
+            .join('')
+            .trim();
+          if (text) {
+            userContent = text;
+            break;
+          }
+        }
+      }
     } else {
-      // For any complex content, just extract text parts
+      // For any other complex content, try extract text parts
       userContent = this.extractTextFromContent(request.contents as any);
     }
     
+    // Optional debug logging to file (if enabled in config)
+    if (this.config.debugLogging) {
+      const debugLog = {
+        timestamp: new Date().toISOString(),
+        contentType: typeof request.contents,
+        extractedContent: userContent,
+        hasTools: this.hasTools(request),
+        requestSummary: {
+          isString: typeof request.contents === 'string',
+          isArray: Array.isArray(request.contents),
+          arrayLength: Array.isArray(request.contents) ? request.contents.length : 0
+        }
+      };
+      
+      import('fs').then(fs => {
+        fs.appendFileSync('./debug.log', 
+          JSON.stringify(debugLog, null, 2) + '\n---\n');
+      }).catch(err => console.warn('Debug log failed:', err));
+    }
+    
     // Always add user message
+    if (!userContent) {
+      console.warn('⚠️ No user content found in request, this should not happen!');
+      console.log('Request contents:', JSON.stringify(request.contents, null, 2));
+    }
+    
     messages.push({
       role: 'user',
-      content: userContent || "Use the shell tool to run the command 'uptime' to check system uptime."
+      content: userContent || "Please provide a valid command to execute."
     });
     
-    if (this.config.debugMode) {
+    if (this.config.debugLogging) {
       console.log('🔧 Final chat messages for API:', JSON.stringify(messages, null, 2));
     }
     
@@ -807,7 +853,7 @@ export class OllamaContentGenerator implements ContentGenerator {
         hasStream: ollamaRequest.stream === false,
       });
       
-      if (this.config.debugMode) {
+      if (this.config.debugLogging) {
         console.log('🔍 Full request JSON:');
         console.log(JSON.stringify(ollamaRequest, null, 2));
       }
