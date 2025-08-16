@@ -81,6 +81,7 @@ export interface TelemetrySettings {
   enabled?: boolean;
   target?: TelemetryTarget;
   otlpEndpoint?: string;
+  otlpProtocol?: 'grpc' | 'http';
   logPrompts?: boolean;
   outfile?: string;
 }
@@ -185,19 +186,19 @@ export interface ConfigParameters {
   model: string;
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
-  experimentalAcp?: boolean;
+  experimentalZedIntegration?: boolean;
   listExtensions?: boolean;
   extensions?: GeminiCLIExtension[];
   blockedMcpServers?: Array<{ name: string; extensionName: string }>;
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
-  ideModeFeature?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
   loadMemoryFromIncludeDirectories?: boolean;
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
+  trustedFolder?: boolean;
   ollamaBaseUrl?: string;
   ollamaModel?: string;
   ollamaEnableChatApi?: boolean;
@@ -249,7 +250,6 @@ export class Config {
   private readonly model: string;
   private readonly extensionContextFilePaths: string[];
   private readonly noBrowser: boolean;
-  private readonly ideModeFeature: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
   private ideMode: boolean;
@@ -267,10 +267,11 @@ export class Config {
   private readonly summarizeToolOutput:
     | Record<string, SummarizeToolOutputSettings>
     | undefined;
-  private readonly experimentalAcp: boolean = false;
+  private readonly experimentalZedIntegration: boolean = false;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
+  private readonly trustedFolder: boolean | undefined;
   private readonly ollamaBaseUrl: string | undefined;
   private readonly ollamaModel: string | undefined;
   private readonly ollamaEnableChatApi: boolean;
@@ -310,6 +311,7 @@ export class Config {
       enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
       otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
+      otlpProtocol: params.telemetry?.otlpProtocol,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
     };
@@ -329,13 +331,13 @@ export class Config {
     this.model = params.model;
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.experimentalAcp = params.experimentalAcp ?? false;
+    this.experimentalZedIntegration =
+      params.experimentalZedIntegration ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this._extensions = params.extensions ?? [];
     this._blockedMcpServers = params.blockedMcpServers ?? [];
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
-    this.ideModeFeature = params.ideModeFeature ?? false;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
@@ -344,6 +346,7 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
+    this.trustedFolder = params.trustedFolder;
     this.ollamaBaseUrl = params.ollamaBaseUrl;
     this.ollamaModel = params.ollamaModel;
     this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
@@ -405,13 +408,21 @@ export class Config {
     const newGeminiClient = new GeminiClient(this);
     await newGeminiClient.initialize(newContentGeneratorConfig);
 
+    // Vertex and Genai have incompatible encryption and sending history with
+    // throughtSignature from Genai to Vertex will fail, we need to strip them
+    const fromGenaiToVertex =
+      this.contentGeneratorConfig?.authType === AuthType.USE_GEMINI &&
+      authMethod === AuthType.LOGIN_WITH_GOOGLE;
+
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.geminiClient = newGeminiClient;
 
     // Restore the conversation history to the new client
     if (existingHistory.length > 0) {
-      this.geminiClient.setHistory(existingHistory);
+      this.geminiClient.setHistory(existingHistory, {
+        stripThoughts: fromGenaiToVertex,
+      });
     }
 
     // Reset the session flag since we're explicitly changing auth and using default model
@@ -586,6 +597,10 @@ export class Config {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
 
+  getTelemetryOtlpProtocol(): 'grpc' | 'http' {
+    return this.telemetrySettings.otlpProtocol ?? 'grpc';
+  }
+
   getTelemetryTarget(): TelemetryTarget {
     return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
   }
@@ -690,8 +705,8 @@ export class Config {
     return this.extensionContextFilePaths;
   }
 
-  getExperimentalAcp(): boolean {
-    return this.experimentalAcp;
+  getExperimentalZedIntegration(): boolean {
+    return this.experimentalZedIntegration;
   }
 
   getListExtensions(): boolean {
@@ -720,10 +735,6 @@ export class Config {
     return this.summarizeToolOutput;
   }
 
-  getIdeModeFeature(): boolean {
-    return this.ideModeFeature;
-  }
-
   getIdeMode(): boolean {
     return this.ideMode;
   }
@@ -734,6 +745,10 @@ export class Config {
 
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  isTrustedFolder(): boolean | undefined {
+    return this.trustedFolder;
   }
 
   setIdeMode(value: boolean): void {
