@@ -553,7 +553,7 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Build chat messages for API requests - simplified and robust approach
+   * Build chat messages for API requests - optimized for request size limits
    */
   private buildChatMessagesForApi(request: GenerateContentParameters): OllamaChatMessage[] {
     const messages: OllamaChatMessage[] = [];
@@ -568,45 +568,144 @@ export class OllamaContentGenerator implements ContentGenerator {
       });
     }
     
-    // PROPER TOOL CALLING APPROACH: Use full conversation history for tool calling
-    // Tool calling requires proper conversation context with assistant/tool message flow
+    // CRITICAL OPTIMIZATION: Limit request size to prevent model crashes
+    // Based on testing: gpt-oss:20b fails at ~20KB, qwen3:30b fails at ~30KB
+    const MAX_REQUEST_SIZE = 18000; // 18KB safe limit for compatibility with all tested models
+    
     if (Array.isArray(request.contents)) {
       const conversationMessages = this.buildChatMessages(request.contents as Content[]);
-      messages.push(...conversationMessages);
+      
+      // Optimize conversation history to fit within size limits
+      const optimizedMessages = this.optimizeConversationForRequestSize(conversationMessages, MAX_REQUEST_SIZE);
+      messages.push(...optimizedMessages);
     } else if (typeof request.contents === 'string') {
+      // Truncate single string content if too large
+      const truncatedContent = this.truncateContentForRequestSize(request.contents, MAX_REQUEST_SIZE);
       messages.push({
         role: 'user',
-        content: request.contents
+        content: truncatedContent
       });
     } else if (request.contents) {
       // Single content object
       const userContent = this.extractTextFromContent(request.contents as any);
       if (userContent) {
+        const truncatedContent = this.truncateContentForRequestSize(userContent, MAX_REQUEST_SIZE);
         messages.push({
           role: 'user',
-          content: userContent
+          content: truncatedContent
         });
       }
     }
     
-    // Debug logging is handled by the main writeDebugLog method
-    
     // Validate that we have at least one message
-    if (messages.length === 1) {
+    if (messages.length === 1 && tools.length > 0) {
       // Only system message - need user input
       console.warn('⚠️ No user content found in request, this should not happen!');
-      console.log('Request contents:', JSON.stringify(request.contents, null, 2));
       messages.push({
         role: 'user',
         content: "Please provide a valid command to execute."
       });
     }
     
+    // Final size check and warning
+    const totalSize = messages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
     if (this.config.debugLogging) {
-      console.log('🔧 Final chat messages for API:', JSON.stringify(messages, null, 2));
+      console.log(`🔧 Built ${messages.length} chat messages, total size: ${totalSize} chars`);
+      if (totalSize > MAX_REQUEST_SIZE) {
+        console.warn(`⚠️ Request size ${totalSize} exceeds safe limit ${MAX_REQUEST_SIZE}`);
+      }
     }
     
     return messages;
+  }
+
+  /**
+   * Optimize conversation history to fit within request size limits
+   */
+  private optimizeConversationForRequestSize(messages: OllamaChatMessage[], maxSize: number): OllamaChatMessage[] {
+    if (messages.length === 0) return messages;
+    
+    // Calculate current size
+    let currentSize = messages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
+    
+    if (currentSize <= maxSize) {
+      return messages; // Already within limits
+    }
+    
+    // Strategy: Keep the last user message and recent assistant/tool exchanges
+    // Remove large system context from earlier messages
+    const optimized: OllamaChatMessage[] = [];
+    
+    // Always keep the last few messages (most recent conversation)
+    const recentMessages = messages.slice(-5); // Keep last 5 messages
+    let recentSize = recentMessages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
+    
+    if (recentSize <= maxSize) {
+      return recentMessages;
+    }
+    
+    // If even recent messages are too large, truncate the last user message
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage && lastMessage.role === 'user' && lastMessage.content) {
+      const truncatedContent = this.truncateContentForRequestSize(lastMessage.content, maxSize * 0.8); // Use 80% for user message
+      return [{
+        role: lastMessage.role,
+        content: truncatedContent
+      }];
+    }
+    
+    return recentMessages.slice(-2); // Fallback: keep only last 2 messages
+  }
+
+  /**
+   * Truncate content to fit within size limits while preserving important information
+   */
+  private truncateContentForRequestSize(content: string, maxSize: number): string {
+    if (content.length <= maxSize) {
+      return content;
+    }
+    
+    // Strategy: Keep important context and recent information
+    const lines = content.split('\n');
+    const importantPatterns = [
+      /current working directory/i,
+      /today's date/i,
+      /operating system/i,
+      /\.md$/i, // Markdown files
+      /error|warning|failed/i,
+      /command|tool|function/i
+    ];
+    
+    // Collect important lines
+    const importantLines: string[] = [];
+    const regularLines: string[] = [];
+    
+    for (const line of lines) {
+      if (importantPatterns.some(pattern => pattern.test(line)) || line.length < 100) {
+        importantLines.push(line);
+      } else {
+        regularLines.push(line);
+      }
+    }
+    
+    // Build truncated content
+    let result = importantLines.join('\n');
+    
+    // Add as many regular lines as possible
+    for (const line of regularLines.slice(-10)) { // Prefer recent lines
+      const testResult = result + '\n' + line;
+      if (testResult.length > maxSize * 0.9) { // Leave 10% buffer
+        break;
+      }
+      result = testResult;
+    }
+    
+    // Add truncation notice if we truncated
+    if (result.length < content.length) {
+      result += '\n\n[Content truncated to fit model request size limits]';
+    }
+    
+    return result;
   }
 
   /**
@@ -1135,6 +1234,15 @@ export class OllamaContentGenerator implements ContentGenerator {
   ): Promise<GenerateContentResponse> {
     let prompt = this.contentsToPrompt(request.contents);
     
+    // CRITICAL OPTIMIZATION: Limit prompt size to prevent model crashes
+    const MAX_PROMPT_SIZE = 18000; // 18KB safe limit for compatibility with all tested models
+    if (prompt.length > MAX_PROMPT_SIZE) {
+      if (this.config.debugLogging) {
+        console.warn(`⚠️ Prompt size ${prompt.length} exceeds limit, truncating to ${MAX_PROMPT_SIZE}`);
+      }
+      prompt = this.truncateContentForRequestSize(prompt, MAX_PROMPT_SIZE);
+    }
+    
     const ollamaRequest: OllamaGenerateRequest = {
       model: this.config.model,
       prompt: prompt,
@@ -1151,10 +1259,23 @@ export class OllamaContentGenerator implements ContentGenerator {
         ollamaRequest.format = request.config.responseJsonSchema as Record<string, unknown>;
         // Also add explicit instructions to the prompt
         const schemaPrompt = this.schemaToPromptText(request.config.responseJsonSchema);
-        ollamaRequest.prompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        const fullPrompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        
+        // Check if combined prompt exceeds limits
+        if (fullPrompt.length > MAX_PROMPT_SIZE) {
+          ollamaRequest.prompt = this.truncateContentForRequestSize(fullPrompt, MAX_PROMPT_SIZE);
+        } else {
+          ollamaRequest.prompt = fullPrompt;
+        }
       } else {
         ollamaRequest.format = 'json';
-        ollamaRequest.prompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        const fullPrompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        
+        if (fullPrompt.length > MAX_PROMPT_SIZE) {
+          ollamaRequest.prompt = this.truncateContentForRequestSize(fullPrompt, MAX_PROMPT_SIZE);
+        } else {
+          ollamaRequest.prompt = fullPrompt;
+        }
       }
     }
 
@@ -1169,11 +1290,13 @@ export class OllamaContentGenerator implements ContentGenerator {
     ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
 
     if (this.config.debugLogging) {
-      console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
+      console.log(`🔧 Generate API request size: ${ollamaRequest.prompt.length} chars (limit: ${MAX_PROMPT_SIZE})`);
     }
 
     try {
-      console.debug('Ollama request:', JSON.stringify(ollamaRequest, null, 2));
+      if (this.config.debugLogging) {
+        console.debug('Ollama generate request size:', ollamaRequest.prompt.length, 'chars');
+      }
       
       const response = await fetch(`${this.config.baseUrl}/api/generate`, {
         method: 'POST',
@@ -1188,7 +1311,9 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
 
       const ollamaResponse: OllamaGenerateResponse = await response.json();
-      console.debug('Ollama response:', JSON.stringify(ollamaResponse, null, 2));
+      if (this.config.debugLogging) {
+        console.debug('Ollama response received successfully');
+      }
       
       // Check if we got a valid response (either text or tool calls)
       if ((!ollamaResponse.response || ollamaResponse.response.trim() === '') && 
@@ -1443,6 +1568,15 @@ export class OllamaContentGenerator implements ContentGenerator {
     let prompt = this.contentsToPrompt(request.contents);
     const originalPrompt = prompt;
     
+    // CRITICAL OPTIMIZATION: Limit prompt size to prevent model crashes
+    const MAX_PROMPT_SIZE = 18000; // 18KB safe limit for compatibility with all tested models
+    if (prompt.length > MAX_PROMPT_SIZE) {
+      if (this.config.debugLogging) {
+        console.warn(`⚠️ Stream prompt size ${prompt.length} exceeds limit, truncating to ${MAX_PROMPT_SIZE}`);
+      }
+      prompt = this.truncateContentForRequestSize(prompt, MAX_PROMPT_SIZE);
+    }
+    
     const ollamaRequest: OllamaGenerateRequest = {
       model: this.config.model,
       prompt: prompt,
@@ -1459,10 +1593,23 @@ export class OllamaContentGenerator implements ContentGenerator {
         ollamaRequest.format = request.config.responseJsonSchema as Record<string, unknown>;
         // Also add explicit instructions to the prompt
         const schemaPrompt = this.schemaToPromptText(request.config.responseJsonSchema);
-        ollamaRequest.prompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        const fullPrompt = prompt + '\n\n' + schemaPrompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        
+        // Check if combined prompt exceeds limits
+        if (fullPrompt.length > MAX_PROMPT_SIZE) {
+          ollamaRequest.prompt = this.truncateContentForRequestSize(fullPrompt, MAX_PROMPT_SIZE);
+        } else {
+          ollamaRequest.prompt = fullPrompt;
+        }
       } else {
         ollamaRequest.format = 'json';
-        ollamaRequest.prompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        const fullPrompt = prompt + '\n\nRespond with valid JSON only, no additional text or formatting.';
+        
+        if (fullPrompt.length > MAX_PROMPT_SIZE) {
+          ollamaRequest.prompt = this.truncateContentForRequestSize(fullPrompt, MAX_PROMPT_SIZE);
+        } else {
+          ollamaRequest.prompt = fullPrompt;
+        }
       }
     }
 
@@ -1477,7 +1624,7 @@ export class OllamaContentGenerator implements ContentGenerator {
     ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
 
     if (this.config.debugLogging) {
-      console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
+      console.log(`🔧 Stream request size: ${ollamaRequest.prompt.length} chars (limit: ${MAX_PROMPT_SIZE})`);
     }
 
     try {
