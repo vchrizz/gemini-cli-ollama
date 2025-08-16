@@ -15,11 +15,8 @@ import {
   ContentListUnion,
   FinishReason,
   Candidate,
-  FunctionDeclaration,
-  Tool,
   ToolListUnion,
   FunctionCall,
-  FunctionResponse,
 } from '@google/genai';
 import { ContentGenerator } from './contentGenerator.js';
 import { setOllamaModelContextLength, getOllamaModelContextLength } from './ollamaTokenLimits.js';
@@ -296,47 +293,6 @@ export class OllamaContentGenerator implements ContentGenerator {
     return ollamaTools;
   }
 
-  /**
-   * Convert Gemini-style contents to Ollama messages format
-   */
-  private contentsToMessages(contents: ContentListUnion): OllamaChatMessage[] {
-    if (typeof contents === 'string') {
-      return [{ role: 'user', content: contents }];
-    }
-    
-    if (Array.isArray(contents)) {
-      if (contents.length === 0) return [];
-      
-      // Check if it's an array of Content objects (chat history)
-      if (typeof contents[0] === 'object' && 'parts' in contents[0]) {
-        return this.buildChatMessages(contents as Content[]);
-      } else {
-        // Array of parts - treat as single user message
-        const text = contents
-          .map((part) => {
-            if (typeof part === 'string') {
-              return part;
-            }
-            if (typeof part === 'object' && 'text' in part) {
-              return part.text;
-            }
-            return '';
-          })
-          .join('');
-        return [{ role: 'user', content: text }];
-      }
-    }
-    
-    // Single Content object
-    if (typeof contents === 'object' && 'parts' in contents) {
-      const content = contents as Content;
-      const text = this.extractTextFromContent(content);
-      const role = content.role === 'model' ? 'assistant' : 'user';
-      return [{ role, content: text }];
-    }
-    
-    return [];
-  }
 
   /**
    * Build chat messages from the complete conversation history
@@ -634,7 +590,6 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     // Strategy: Keep the last user message and recent assistant/tool exchanges
     // Remove large system context from earlier messages
-    const optimized: OllamaChatMessage[] = [];
     
     // Always keep the last few messages (most recent conversation)
     const recentMessages = messages.slice(-5); // Keep last 5 messages
@@ -897,36 +852,6 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
 
-  /**
-   * Extract just the last user message from contents (for large model optimization)
-   */
-  private getLastUserMessage(contents: ContentListUnion): string {
-    if (typeof contents === 'string') {
-      return contents;
-    }
-    
-    if (Array.isArray(contents)) {
-      // Find the last user message in conversation history
-      const contentArray = contents as Content[];
-      for (let i = contentArray.length - 1; i >= 0; i--) {
-        const content = contentArray[i];
-        if (content.role === 'user' && content.parts) {
-          const text = content.parts
-            .map((part) => {
-              if (typeof part === 'string') return part;
-              if (typeof part === 'object' && 'text' in part) return part.text;
-              return '';
-            })
-            .join('')
-            .trim();
-          if (text) return text;
-        }
-      }
-    }
-    
-    // Fallback to simple extraction
-    return this.extractSimpleTextContent(contents);
-  }
 
   /**
    * Simple tool detection for API choice
@@ -1199,31 +1124,6 @@ export class OllamaContentGenerator implements ContentGenerator {
     return !!(tools && Array.isArray(tools) && tools.length > 0);
   }
 
-  /**
-   * Extract simple text content from ContentListUnion (safe version)
-   */
-  private extractSimpleTextContent(contents: ContentListUnion): string {
-    if (typeof contents === 'string') {
-      return contents;
-    }
-    
-    if (Array.isArray(contents)) {
-      return contents
-        .map((item) => {
-          if (typeof item === 'string') return item;
-          if (typeof item === 'object' && 'text' in item) return item.text;
-          return '';
-        })
-        .join(' ')
-        .trim();
-    }
-    
-    if (typeof contents === 'object' && 'parts' in contents) {
-      return this.extractTextFromContent(contents as Content);
-    }
-    
-    return '';
-  }
 
   /**
    * Call Ollama Generate API (standard generation with tool support)
