@@ -204,6 +204,8 @@ export interface ConfigParameters {
   ollamaChatTimeout?: number;
   ollamaStreamingTimeout?: number;
   ollamaContextLimit?: number;
+  ollamaRequestContextSize?: number;
+  ollamaTemperature?: number;
   ollamaDebugLogging?: boolean;
 }
 
@@ -275,6 +277,8 @@ export class Config {
   private readonly ollamaChatTimeout: number;
   private readonly ollamaStreamingTimeout: number;
   private readonly ollamaContextLimit: number;
+  private readonly ollamaRequestContextSize: number;
+  private readonly ollamaTemperature: number;
   private readonly ollamaDebugLogging: boolean;
   private initialized: boolean = false;
 
@@ -343,9 +347,11 @@ export class Config {
     this.ollamaBaseUrl = params.ollamaBaseUrl;
     this.ollamaModel = params.ollamaModel;
     this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
-    this.ollamaChatTimeout = params.ollamaChatTimeout ?? 120; // Default: 2 minutes
-    this.ollamaStreamingTimeout = params.ollamaStreamingTimeout ?? 300; // Default: 5 minutes for streaming
-    this.ollamaContextLimit = params.ollamaContextLimit ?? 2048; // Default: Conservative 2K context
+    this.ollamaChatTimeout = params.ollamaChatTimeout ?? 300; // Default: 5 minutes for large models
+    this.ollamaStreamingTimeout = params.ollamaStreamingTimeout ?? 600; // Default: 10 minutes for streaming
+    this.ollamaContextLimit = params.ollamaContextLimit ?? 8192; // Default: 8K context for conversation tracking
+    this.ollamaRequestContextSize = params.ollamaRequestContextSize ?? 8192; // Default: 8K context per request
+    this.ollamaTemperature = params.ollamaTemperature ?? 0.7; // Default: 0.7 balanced creativity
     this.ollamaDebugLogging = params.ollamaDebugLogging ?? false; // Default: Debug logging disabled
 
     if (params.contextFileName) {
@@ -647,6 +653,14 @@ export class Config {
 
   getOllamaContextLimit(): number {
     return this.ollamaContextLimit;
+  }
+
+  getOllamaRequestContextSize(): number {
+    return this.ollamaRequestContextSize;
+  }
+
+  getOllamaTemperature(): number {
+    return this.ollamaTemperature;
   }
 
   getOllamaDebugLogging(): boolean {

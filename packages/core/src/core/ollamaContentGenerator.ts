@@ -842,7 +842,16 @@ export class OllamaContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     if (this.config.debugLogging) {
+      const stackTrace = new Error().stack;
       console.log(`🚨 OLLAMA generateContent called! PromptID: ${userPromptId}`);
+      console.log(`📍 Called from:`, stackTrace?.split('\n')[2]?.trim());
+      
+      await this.writeDebugLog('GENERATE_CONTENT_ENTRY', {
+        userPromptId,
+        timestamp: new Date().toISOString(),
+        configDebugLogging: this.config.debugLogging,
+        calledFrom: stackTrace?.split('\n')[2]?.trim()
+      });
     }
     
     const hasTools = this.hasTools(request);
@@ -882,17 +891,23 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
       // Use Chat API for tool calling (as demonstrated in your working cURL example)
-      console.log('✅ Ollama generateContent - using Chat API for tool request');
+      if (this.config.debugLogging) {
+        console.log('✅ Ollama generateContent - using Chat API for tool request');
+      }
       try {
         return await this.callChatAPI(request, userPromptId);
       } catch (error) {
         console.error('Chat API failed for tools:', error instanceof Error ? error.message : String(error));
-        console.debug('Fallback to Generate API - tools will not be executed');
+        if (this.config.debugLogging) {
+          console.debug('Fallback to Generate API - tools will not be executed');
+        }
         return await this.callGenerateAPI(request, userPromptId);
       }
     } else {
       // Use Generate API for non-tool requests or when Chat API is disabled
-      console.log('🔄 Ollama generateContent - using Generate API');
+      if (this.config.debugLogging) {
+        console.log('🔄 Ollama generateContent - using Generate API');
+      }
       return await this.callGenerateAPI(request, userPromptId);
     }
   }
@@ -962,15 +977,14 @@ export class OllamaContentGenerator implements ContentGenerator {
         console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
       }
 
-      console.log('🔍 Ollama chat request being sent:', {
-        model: ollamaRequest.model,
-        messageCount: ollamaRequest.messages.length,
-        toolCount: tools.length,
-        timeoutMs: timeout,
-        hasStream: ollamaRequest.stream === false,
-      });
-      
       if (this.config.debugLogging) {
+        console.log('🔍 Ollama chat request being sent:', {
+          model: ollamaRequest.model,
+          messageCount: ollamaRequest.messages.length,
+          toolCount: tools.length,
+          timeoutMs: timeout,
+          hasStream: ollamaRequest.stream === false,
+        });
         console.log('🔍 Full request JSON:');
         console.log(JSON.stringify(ollamaRequest, null, 2));
       }
@@ -999,7 +1013,9 @@ export class OllamaContentGenerator implements ContentGenerator {
         console.warn(`⚠️ Large content detected (${totalContentLength} chars) - may cause GPU hang`);
       }
       
-      console.log('🌐 Making fetch request to Ollama...');
+      if (this.config.debugLogging) {
+        console.log('🌐 Making fetch request to Ollama...');
+      }
       const response = await fetch(`${this.config.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
@@ -1009,7 +1025,9 @@ export class OllamaContentGenerator implements ContentGenerator {
         signal: controller.signal,
       });
 
-      console.log('📡 Fetch response received:', response.status, response.statusText);
+      if (this.config.debugLogging) {
+        console.log('📡 Fetch response received:', response.status, response.statusText);
+      }
 
       if (!response.ok) {
         clearTimeout(timeoutId);
@@ -1017,22 +1035,29 @@ export class OllamaContentGenerator implements ContentGenerator {
         throw new Error(`Ollama API error ${response.status}: ${errorText}`);
       }
 
-      console.log('🔄 Reading response as text first...');
+      if (this.config.debugLogging) {
+        console.log('🔄 Reading response as text first...');
+      }
       const responseText = await response.text();
-      console.log('📄 Response text length:', responseText.length);
-      console.log('📄 Response preview:', responseText.substring(0, 200));
-      
-      console.log('🔄 Parsing JSON...');
+      if (this.config.debugLogging) {
+        console.log('📄 Response text length:', responseText.length);
+        console.log('📄 Response preview:', responseText.substring(0, 200));
+        console.log('🔄 Parsing JSON...');
+      }
       const ollamaResponse: OllamaChatResponse = JSON.parse(responseText);
-      console.log('✅ JSON parsed successfully');
+      if (this.config.debugLogging) {
+        console.log('✅ JSON parsed successfully');
+      }
 
       clearTimeout(timeoutId);
-      console.debug('Ollama chat response received:', {
-        hasMessage: !!ollamaResponse.message,
-        hasContent: !!ollamaResponse.message?.content,
-        hasToolCalls: !!ollamaResponse.message?.tool_calls,
-        done: ollamaResponse.done
-      });
+      if (this.config.debugLogging) {
+        console.debug('Ollama chat response received:', {
+          hasMessage: !!ollamaResponse.message,
+          hasContent: !!ollamaResponse.message?.content,
+          hasToolCalls: !!ollamaResponse.message?.tool_calls,
+          done: ollamaResponse.done
+        });
+      }
       
       // Debug log the response if enabled
       if (this.config.debugLogging) {
@@ -1182,7 +1207,16 @@ export class OllamaContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     if (this.config.debugLogging) {
+      const stackTrace = new Error().stack;
       console.log(`🔄 OLLAMA generateContentStream called! PromptID: ${userPromptId}`);
+      console.log(`📍 Stream called from:`, stackTrace?.split('\n')[2]?.trim());
+      
+      await this.writeDebugLog('GENERATE_CONTENT_STREAM_ENTRY', {
+        userPromptId,
+        timestamp: new Date().toISOString(),
+        configDebugLogging: this.config.debugLogging,
+        calledFrom: stackTrace?.split('\n')[2]?.trim()
+      });
     }
     
     const hasTools = this.hasTools(request);
@@ -1197,7 +1231,9 @@ export class OllamaContentGenerator implements ContentGenerator {
         return this.callChatAPIStream(request, userPromptId);
       } catch (error) {
         console.warn('Chat API stream failed for tools:', error instanceof Error ? error.message : String(error));
-        console.debug('Fallback to Generate API stream - tools will not be executed');
+        if (this.config.debugLogging) {
+          console.debug('Fallback to Generate API stream - tools will not be executed');
+        }
         return this.callGenerateAPIStream(request, userPromptId);
       }
     } else {
@@ -1278,7 +1314,9 @@ export class OllamaContentGenerator implements ContentGenerator {
         });
       }
 
-      console.log(`🚀 Ollama Chat API stream request to: ${this.config.baseUrl}/api/chat`);
+      if (this.config.debugLogging) {
+        console.log(`🚀 Ollama Chat API stream request to: ${this.config.baseUrl}/api/chat`);
+      }
       const response = await fetch(`${this.config.baseUrl}/api/chat`, {
         method: 'POST',
         headers: {
@@ -1301,12 +1339,17 @@ export class OllamaContentGenerator implements ContentGenerator {
       const decoder = new TextDecoder();
       let buffer = '';
       let hasYieldedAnyContent = false;
+      let streamCompleted = false;
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           
           if (done) {
+            if (this.config.debugLogging) {
+              console.log('📡 Ollama stream completed (done=true)');
+            }
+            streamCompleted = true;
             break;
           }
 
@@ -1318,6 +1361,14 @@ export class OllamaContentGenerator implements ContentGenerator {
             if (line.trim()) {
               try {
                 const ollamaResponse: OllamaChatResponse = JSON.parse(line);
+                
+                if (this.config.debugLogging) {
+                  console.log('📦 Ollama stream chunk:', {
+                    hasMessage: !!ollamaResponse.message,
+                    hasContent: !!ollamaResponse.message?.content,
+                    done: ollamaResponse.done
+                  });
+                }
                 
                 // Only yield if there's new content or tool calls
                 if ((ollamaResponse.message && ollamaResponse.message.content) || 
@@ -1339,6 +1390,10 @@ export class OllamaContentGenerator implements ContentGenerator {
                 }
 
                 if (ollamaResponse.done) {
+                  if (this.config.debugLogging) {
+                    console.log('📡 Ollama stream marked as done');
+                  }
+                  streamCompleted = true;
                   break;
                 }
               } catch (parseError) {
@@ -1347,10 +1402,26 @@ export class OllamaContentGenerator implements ContentGenerator {
               }
             }
           }
+          
+          if (streamCompleted) {
+            break;
+          }
         }
+        
+        if (!hasYieldedAnyContent && this.config.debugLogging) {
+          console.warn('⚠️ No content yielded from Ollama stream');
+        }
+        
       } finally {
-        reader.releaseLock();
+        try {
+          reader.releaseLock();
+        } catch (e) {
+          console.warn('Warning: could not release reader lock:', e);
+        }
         clearTimeout(timeoutId);
+        if (this.config.debugLogging) {
+          console.log('🧹 Chat stream cleanup completed');
+        }
       }
     } catch (error) {
       clearTimeout(timeoutId);
@@ -1430,12 +1501,17 @@ export class OllamaContentGenerator implements ContentGenerator {
       const decoder = new TextDecoder();
       let buffer = '';
       let totalResponse = '';
+      let streamCompleted = false;
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           
           if (done) {
+            if (this.config.debugLogging) {
+              console.log('📡 Ollama generate stream completed (done=true)');
+            }
+            streamCompleted = true;
             break;
           }
 
@@ -1447,6 +1523,14 @@ export class OllamaContentGenerator implements ContentGenerator {
             if (line.trim()) {
               try {
                 const ollamaResponse: OllamaGenerateResponse = JSON.parse(line);
+                
+                if (this.config.debugLogging) {
+                  console.log('📦 Ollama generate chunk:', {
+                    hasResponse: !!ollamaResponse.response,
+                    responseLength: ollamaResponse.response?.length || 0,
+                    done: ollamaResponse.done
+                  });
+                }
                 
                 // Only yield if there's new content
                 if (ollamaResponse.response) {
@@ -1466,6 +1550,10 @@ export class OllamaContentGenerator implements ContentGenerator {
                 }
 
                 if (ollamaResponse.done) {
+                  if (this.config.debugLogging) {
+                    console.log('📡 Ollama generate stream marked as done');
+                  }
+                  streamCompleted = true;
                   break;
                 }
               } catch (parseError) {
@@ -1473,9 +1561,20 @@ export class OllamaContentGenerator implements ContentGenerator {
               }
             }
           }
+          
+          if (streamCompleted) {
+            break;
+          }
         }
       } finally {
-        reader.releaseLock();
+        try {
+          reader.releaseLock();
+        } catch (e) {
+          console.warn('Warning: could not release generate reader lock:', e);
+        }
+        if (this.config.debugLogging) {
+          console.log('🧹 Generate stream cleanup completed');
+        }
       }
     } catch (error) {
       throw new Error(`Failed to generate content stream with Ollama: ${error}`);

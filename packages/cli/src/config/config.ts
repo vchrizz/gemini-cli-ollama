@@ -496,6 +496,12 @@ export async function loadCliConfig(
     ollamaBaseUrl: settings.ollamaBaseUrl,
     ollamaModel: settings.ollamaModel,
     ollamaEnableChatApi: settings.ollamaEnableChatApi,
+    ollamaChatTimeout: settings.ollamaChatTimeout,
+    ollamaStreamingTimeout: settings.ollamaStreamingTimeout,
+    ollamaContextLimit: settings.ollamaContextLimit,
+    ollamaRequestContextSize: settings.ollamaRequestContextSize,
+    ollamaTemperature: settings.ollamaTemperature,
+    ollamaDebugLogging: settings.ollamaDebugLogging,
   });
 }
 

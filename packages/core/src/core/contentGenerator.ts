@@ -171,13 +171,16 @@ export async function createContentGenerator(
 
   if (config.authType === AuthType.USE_OLLAMA) {
     const debugLoggingEnabled = config.ollamaDebugLogging || false;
-    console.log('🚀 Creating OllamaContentGenerator with config:', {
-      authType: config.authType,
-      baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
-      model: config.model,
-      enableChatApi: config.ollamaEnableChatApi,
-      debugLogging: debugLoggingEnabled
-    });
+    
+    if (debugLoggingEnabled) {
+      console.log('🚀 Creating OllamaContentGenerator with config:', {
+        authType: config.authType,
+        baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
+        model: config.model,
+        enableChatApi: config.ollamaEnableChatApi,
+        debugLogging: debugLoggingEnabled
+      });
+    }
     
     const ollamaConfig = {
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
@@ -195,7 +198,9 @@ export async function createContentGenerator(
     // Ensure context length is initialized synchronously
     await ollamaGenerator.ensureContextLengthInitialized();
     
-    console.log('✅ OllamaContentGenerator created and initialized');
+    if (debugLoggingEnabled) {
+      console.log('✅ OllamaContentGenerator created and initialized');
+    }
     return new LoggingContentGenerator(ollamaGenerator, gcConfig);
   }
 
