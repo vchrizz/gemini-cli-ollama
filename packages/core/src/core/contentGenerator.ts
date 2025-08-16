@@ -61,6 +61,9 @@ export type ContentGeneratorConfig = {
   ollamaChatTimeout?: number;
   ollamaStreamingTimeout?: number;
   ollamaContextLimit?: number;
+  ollamaRequestContextSize?: number;
+  ollamaTemperature?: number;
+  ollamaDebugLogging?: boolean;
 };
 
 export function createContentGeneratorConfig(
@@ -84,6 +87,9 @@ export function createContentGeneratorConfig(
     ollamaChatTimeout: config?.getOllamaChatTimeout(),
     ollamaStreamingTimeout: config?.getOllamaStreamingTimeout(),
     ollamaContextLimit: config?.getOllamaContextLimit(),
+    ollamaRequestContextSize: config?.getOllamaRequestContextSize(),
+    ollamaTemperature: config?.getOllamaTemperature(),
+    ollamaDebugLogging: config?.getOllamaDebugLogging(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -164,21 +170,25 @@ export async function createContentGenerator(
   }
 
   if (config.authType === AuthType.USE_OLLAMA) {
+    const debugLoggingEnabled = config.ollamaDebugLogging || false;
     console.log('🚀 Creating OllamaContentGenerator with config:', {
       authType: config.authType,
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
       model: config.model,
-      enableChatApi: config.ollamaEnableChatApi
+      enableChatApi: config.ollamaEnableChatApi,
+      debugLogging: debugLoggingEnabled
     });
     
     const ollamaConfig = {
       baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
       model: config.model,
       enableChatApi: config.ollamaEnableChatApi,
-      timeout: (config.ollamaChatTimeout || 120) * 1000, // Convert seconds to milliseconds  
-      streamingTimeout: (config.ollamaStreamingTimeout || 300) * 1000, // Convert seconds to milliseconds
-      contextLimit: config.ollamaContextLimit || 2048, // Default: Conservative 2K context
-      debugLogging: gcConfig.getOllamaDebugLogging(), // Use Ollama-specific debug logging
+      timeout: (config.ollamaChatTimeout || 300) * 1000, // Convert seconds to milliseconds  
+      streamingTimeout: (config.ollamaStreamingTimeout || 600) * 1000, // Convert seconds to milliseconds
+      contextLimit: config.ollamaContextLimit || 8192, // Default: 8K context for conversation tracking
+      requestContextSize: config.ollamaRequestContextSize || 8192, // Default: 8K context per request
+      temperature: config.ollamaTemperature || 0.7, // Default: 0.7 balanced creativity
+      debugLogging: debugLoggingEnabled, // Use Ollama-specific debug logging
     };
     const ollamaGenerator = new OllamaContentGenerator(ollamaConfig);
     
