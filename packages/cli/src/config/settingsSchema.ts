@@ -309,8 +309,8 @@ export const SETTINGS_SCHEMA = {
     label: 'Ollama Chat API Timeout (seconds)',
     category: 'Ollama',
     requiresRestart: false,
-    default: 120 as number, // Default: 2 minutes
-    description: 'Timeout for non-streaming Ollama Chat API requests in seconds. Used for single response queries.',
+    default: 300 as number, // Default: 5 minutes for large models
+    description: 'Timeout for non-streaming Ollama Chat API requests in seconds. Large models (>7B params) need longer timeouts.',
     showInDialog: true,
   },
   ollamaStreamingTimeout: {
@@ -318,17 +318,35 @@ export const SETTINGS_SCHEMA = {
     label: 'Ollama Streaming Timeout (seconds)',
     category: 'Ollama',
     requiresRestart: false,
-    default: 300 as number, // Default: 5 minutes for streaming
+    default: 600 as number, // Default: 10 minutes for streaming
     description: 'Timeout for Ollama streaming Chat API requests in seconds. Used for tool calling and continuous conversation flow.',
     showInDialog: true,
   },
   ollamaContextLimit: {
     type: 'number',
-    label: 'Ollama Context Window Size',
+    label: 'Ollama Conversation Context Limit',
     category: 'Ollama',
     requiresRestart: false,
-    default: 2048 as number, // Default: Conservative 2K context to prevent GPU hangs
-    description: 'Context window size for Ollama requests. Lower values prevent GPU hangs but limit conversation length. Higher values allow longer context but may cause stability issues.',
+    default: 8192 as number, // Default: 8K context for conversation tracking (auto-detects model limits)
+    description: 'Maximum conversation length in tokens before compression. Used for conversation history management, not per-request limits. Auto-detected from model capabilities.',
+    showInDialog: true,
+  },
+  ollamaRequestContextSize: {
+    type: 'number',
+    label: 'Ollama Request Context Size',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: 8192 as number, // Default: 8K tokens per request (matches Ollama default)
+    description: 'Context window size per request (num_ctx parameter). Should match Ollama server configuration. Higher values need more VRAM.',
+    showInDialog: true,
+  },
+  ollamaTemperature: {
+    type: 'number',
+    label: 'Ollama Temperature',
+    category: 'Ollama',
+    requiresRestart: false,
+    default: 0.7 as number, // Default: 0.7 balanced creativity
+    description: 'Controls AI response creativity/randomness. 0.0 = deterministic, 0.7 = balanced, 1.0+ = very creative. Lower values for code generation, higher for creative writing.',
     showInDialog: true,
   },
   ollamaDebugLogging: {
@@ -337,7 +355,7 @@ export const SETTINGS_SCHEMA = {
     category: 'Ollama',
     requiresRestart: false,
     default: false as boolean, // Default: Debug logging disabled
-    description: 'Enable debug logging to ./debug.log file for troubleshooting Ollama integration issues. Only enable when needed as it may impact performance.',
+    description: 'Enable debug logging to ./ollama-debug.log file for troubleshooting Ollama integration issues. Only enable when needed as it may impact performance.',
     showInDialog: true,
   },
   useExternalAuth: {

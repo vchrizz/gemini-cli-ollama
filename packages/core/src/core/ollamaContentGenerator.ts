@@ -30,7 +30,9 @@ interface OllamaConfig {
   enableChatApi?: boolean;
   timeout?: number; // Timeout in milliseconds
   streamingTimeout?: number; // Streaming timeout in milliseconds
-  contextLimit?: number; // Context window size (num_ctx)
+  contextLimit?: number; // Context window size for conversation tracking
+  requestContextSize?: number; // Context window size per request (num_ctx)
+  temperature?: number; // Response creativity/randomness (0.0-1.0+)
   debugLogging?: boolean; // Enable debug logging to file
 }
 
@@ -39,6 +41,7 @@ interface OllamaGenerateRequest {
   prompt: string;
   stream?: boolean;
   format?: string | Record<string, unknown>;
+  keep_alive?: string; // Model keep-alive duration
   options?: {
     temperature?: number;
     top_p?: number;
@@ -79,6 +82,7 @@ interface OllamaChatRequest {
   tools?: OllamaTool[];
   stream?: boolean;
   format?: string | Record<string, unknown>;
+  keep_alive?: string; // Model keep-alive duration
   options?: {
     temperature?: number;
     top_p?: number;
@@ -181,9 +185,31 @@ export class OllamaContentGenerator implements ContentGenerator {
       const logText = JSON.stringify(logEntry, null, 2) + '\n\n';
       
       const fs = await import('fs');
-      fs.appendFileSync('./ollama-debug.log', logText);
+      const path = await import('path');
+      
+      // Write to current working directory
+      const cwd = process.cwd();
+      const ollamaDebugPath = path.join(cwd, 'ollama-debug.log');
+      
+      console.log(`📝 Writing debug log to: ${ollamaDebugPath}`);
+      
+      // Write only to ollama-debug.log for Ollama-specific debugging
+      fs.appendFileSync(ollamaDebugPath, logText);
+      
+      // Add performance warnings for slow requests
+      if (eventType === 'OLLAMA_RESPONSE' && data.fullResponse?.total_duration) {
+        const totalMs = data.fullResponse.total_duration / 1000000; // Convert nanoseconds to milliseconds
+        const loadMs = (data.fullResponse.load_duration || 0) / 1000000;
+        
+        if (totalMs > 10000) { // > 10 seconds
+          console.warn(`⚠️  Ollama request very slow (${(totalMs/1000).toFixed(1)}s total, ${(loadMs/1000).toFixed(1)}s loading). Consider using a smaller/faster model.`);
+        } else if (loadMs > 3000) { // > 3 seconds loading
+          console.warn(`⚠️  Ollama model loading slow (${(loadMs/1000).toFixed(1)}s). Model not kept in memory - consider increasing context limit or using keep_alive.`);
+        }
+      }
     } catch (error) {
       console.warn('Failed to write debug log:', error);
+      console.warn('Error details:', error);
     }
   }
 
@@ -213,6 +239,17 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     // If not cached, initialize it now
     await this.initializeContextLength();
+  }
+
+  /**
+   * Get request context size (num_ctx parameter for Ollama)
+   */
+  private getRequestContextSize(): number {
+    // Use the dedicated request context size setting
+    const requestContextSize = this.config.requestContextSize || 8192;
+    
+    // Only ensure minimum 1K for safety, no maximum limit
+    return Math.max(requestContextSize, 1024);
   }
 
   /**
@@ -552,25 +589,7 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
     
-    // Optional debug logging to file (if enabled in config)
-    if (this.config.debugLogging) {
-      const debugLog = {
-        timestamp: new Date().toISOString(),
-        contentType: typeof request.contents,
-        messageCount: messages.length,
-        hasTools: this.hasTools(request),
-        requestSummary: {
-          isString: typeof request.contents === 'string',
-          isArray: Array.isArray(request.contents),
-          arrayLength: Array.isArray(request.contents) ? request.contents.length : 0
-        }
-      };
-      
-      import('fs').then(fs => {
-        fs.appendFileSync('./debug.log', 
-          JSON.stringify(debugLog, null, 2) + '\n---\n');
-      }).catch(err => console.warn('Debug log failed:', err));
-    }
+    // Debug logging is handled by the main writeDebugLog method
     
     // Validate that we have at least one message
     if (messages.length === 1) {
@@ -822,8 +841,9 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    // ALWAYS log this call for debugging
-    console.log('🚨 OLLAMA generateContent called! Config.debugLogging:', this.config.debugLogging);
+    if (this.config.debugLogging) {
+      console.log(`🚨 OLLAMA generateContent called! PromptID: ${userPromptId}`);
+    }
     
     const hasTools = this.hasTools(request);
     const enableChatApi = this.config.enableChatApi ?? true; // Default to Chat API for tool calling
@@ -832,44 +852,32 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     // Detailed debug logging if enabled
     if (this.config.debugLogging) {
-      console.log('📝 Writing debug log...');
-      try {
-        await this.writeDebugLog('GENERATE_CONTENT_CALL', {
-          timestamp: new Date().toISOString(),
-          userPromptId,
-          hasTools,
-          enableChatApi,
-          toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
-          contentType: typeof request.contents,
-          willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi),
-          callStack: new Error().stack?.split('\n').slice(1, 6).map(line => line.trim()),
-          requestContents: Array.isArray(request.contents) ? 
-            (request.contents as any[]).map((content, idx) => ({
-              index: idx,
-              role: content.role,
-              partsCount: content.parts?.length || 0,
-              hasText: content.parts?.some((p: any) => typeof p === 'string' || p.text),
-              hasFunctionCall: content.parts?.some((p: any) => p.functionCall),
-              hasFunctionResponse: content.parts?.some((p: any) => p.functionResponse)
-            })) : 
-            `${typeof request.contents}: ${JSON.stringify(request.contents).substring(0, 100)}...`
-        });
-        console.log('✅ Debug log written successfully');
-      } catch (error) {
-        console.error('❌ Failed to write debug log:', error);
-      }
-    } else {
-      console.log('❌ Debug logging is DISABLED');
-    }
-    
-    if (!this.config.debugLogging) {
-      console.log('🚀 Ollama generateContent called with:', {
+      const debugInfo = {
+        timestamp: new Date().toISOString(),
+        userPromptId,
         hasTools,
         enableChatApi,
         toolsLength: tools ? Array.isArray(tools) ? tools.length : 'not array' : 'no tools',
         contentType: typeof request.contents,
-        willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)
-      });
+        willUseChatAPI: hasTools && this.shouldUseChatAPI(hasTools, enableChatApi),
+        requestContents: Array.isArray(request.contents) ? 
+          (request.contents as any[]).map((content, idx) => ({
+            index: idx,
+            role: content.role,
+            partsCount: content.parts?.length || 0,
+            hasText: content.parts?.some((p: any) => typeof p === 'string' || p.text),
+            hasFunctionCall: content.parts?.some((p: any) => p.functionCall),
+            hasFunctionResponse: content.parts?.some((p: any) => p.functionResponse)
+          })) : 
+          `${typeof request.contents}: ${JSON.stringify(request.contents).substring(0, 100)}...`
+      };
+      
+      try {
+        await this.writeDebugLog('GENERATE_CONTENT_CALL', debugInfo);
+        console.log('✅ Debug log written successfully');
+      } catch (error) {
+        console.error('❌ Failed to write debug log:', error);
+      }
     }
     
     if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
@@ -940,11 +948,19 @@ export class OllamaContentGenerator implements ContentGenerator {
         console.debug(`Adding ${tools.length} tools to request`);
       }
 
-      // Use configurable options to prevent GPU hang
+      // Use request-specific context sizing
+      const requestContextSize = this.getRequestContextSize();
       ollamaRequest.options = {
-        temperature: request.config?.temperature || 0.7,
-        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
+        temperature: this.config.temperature || 0.7,
+        num_ctx: requestContextSize,
       };
+      
+      // Keep model in memory for better performance
+      ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
+
+      if (this.config.debugLogging) {
+        console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
+      }
 
       console.log('🔍 Ollama chat request being sent:', {
         model: ollamaRequest.model,
@@ -1117,13 +1133,18 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
 
-    // Apply basic generation config (conservative to prevent GPU hang)
-    if (request.config) {
-      ollamaRequest.options = {
-        temperature: request.config.temperature,
-        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
-        // Other options can be added later as needed
-      };
+    // Apply basic generation config with performance optimizations
+    const requestContextSize = this.getRequestContextSize();
+    ollamaRequest.options = {
+      temperature: this.config.temperature || 0.7,
+      num_ctx: requestContextSize,
+    };
+    
+    // Keep model in memory for better performance
+    ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
+
+    if (this.config.debugLogging) {
+      console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
     }
 
     try {
@@ -1160,12 +1181,18 @@ export class OllamaContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    if (this.config.debugLogging) {
+      console.log(`🔄 OLLAMA generateContentStream called! PromptID: ${userPromptId}`);
+    }
+    
     const hasTools = this.hasTools(request);
     const enableChatApi = this.config.enableChatApi ?? true;
     
     if (hasTools && this.shouldUseChatAPI(hasTools, enableChatApi)) {
       // Use Chat API for tool calling
-      console.debug('Ollama generateContentStream - using Chat API for tool request');
+      if (this.config.debugLogging) {
+        console.log(`✅ Ollama generateContentStream - using Chat API for tool request`);
+      }
       try {
         return this.callChatAPIStream(request, userPromptId);
       } catch (error) {
@@ -1175,7 +1202,9 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     } else {
       // Use Generate API for non-tool requests or when Chat API is disabled
-      console.debug('Ollama generateContentStream - using Generate API');
+      if (this.config.debugLogging) {
+        console.log(`🔄 Ollama generateContentStream - using Generate API`);
+      }
       return this.callGenerateAPIStream(request, userPromptId);
     }
   }
@@ -1225,11 +1254,19 @@ export class OllamaContentGenerator implements ContentGenerator {
         ollamaRequest.tools = tools;
       }
 
-      // Use configurable options to prevent GPU hang
+      // Use request-specific context sizing
+      const requestContextSize = this.getRequestContextSize();
       ollamaRequest.options = {
-        temperature: request.config?.temperature || 0.7,
-        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
+        temperature: this.config.temperature || 0.7,
+        num_ctx: requestContextSize,
       };
+      
+      // Keep model in memory for better performance
+      ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
+
+      if (this.config.debugLogging) {
+        console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
+      }
 
       // Debug log the request if enabled
       if (this.config.debugLogging) {
@@ -1358,13 +1395,18 @@ export class OllamaContentGenerator implements ContentGenerator {
       }
     }
 
-    // Apply basic generation config (conservative to prevent GPU hang)
-    if (request.config) {
-      ollamaRequest.options = {
-        temperature: request.config.temperature,
-        num_ctx: this.config.contextLimit || 2048, // Use configured context limit
-        // Other options can be added later as needed
-      };
+    // Apply basic generation config with performance optimizations
+    const requestContextSize = this.getRequestContextSize();
+    ollamaRequest.options = {
+      temperature: this.config.temperature || 0.7,
+      num_ctx: requestContextSize,
+    };
+    
+    // Keep model in memory for better performance
+    ollamaRequest.keep_alive = '5m'; // Keep model loaded for 5 minutes
+
+    if (this.config.debugLogging) {
+      console.log(`🔧 Using request context size: ${requestContextSize} (configured: ${this.config.requestContextSize})`);
     }
 
     try {
