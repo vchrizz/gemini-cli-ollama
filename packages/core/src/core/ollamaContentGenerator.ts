@@ -163,9 +163,22 @@ export class OllamaContentGenerator implements ContentGenerator {
   constructor(config: OllamaConfig) {
     this.config = config;
     
-    // Synchronously start context length initialization but don't wait for it
-    this.initializeContextLength();
+    // Set context length synchronously from config if available
+    if (this.config.contextLimit && this.config.contextLimit > 0) {
+      setOllamaModelContextLength(this.config.model, this.config.contextLimit);
+      if (this.config.debugLogging) {
+        console.log(`🔍 Set context length from config for ${this.config.model}: ${this.config.contextLimit}`);
+      }
+    } else {
+      // Start async initialization for API fetch
+      this.initializeContextLength().catch((error) => {
+        if (this.config.debugLogging) {
+          console.warn(`⚠️ Failed to initialize context length for ${this.config.model}:`, error);
+        }
+      });
+    }
   }
+
 
   /**
    * Write detailed debug log to file for analysis
@@ -210,12 +223,28 @@ export class OllamaContentGenerator implements ContentGenerator {
     }
   }
 
+
   /**
    * Initialize context length for the model
    */
   private async initializeContextLength(): Promise<void> {
     try {
-      const contextLength = await this.getContextLength(this.config.model);
+      let contextLength: number;
+      
+      // First check if context limit was provided in config
+      if (this.config.contextLimit && this.config.contextLimit > 0) {
+        contextLength = this.config.contextLimit;
+        if (this.config.debugLogging) {
+          console.log(`🔍 Using configured context length for ${this.config.model}: ${contextLength}`);
+        }
+      } else {
+        // Fallback to fetching from Ollama API
+        contextLength = await this.getContextLength(this.config.model);
+        if (this.config.debugLogging) {
+          console.log(`🔍 Fetched context length from API for ${this.config.model}: ${contextLength}`);
+        }
+      }
+      
       setOllamaModelContextLength(this.config.model, contextLength);
     } catch (error) {
       console.warn(`Failed to initialize context length for ${this.config.model}:`, error);
@@ -673,7 +702,9 @@ export class OllamaContentGenerator implements ContentGenerator {
     const usageMetadata = new GenerateContentResponseUsageMetadata();
     
     // Use Ollama's token counts if available, otherwise estimate
-    const promptTokenCount = ollamaResponse.prompt_eval_count || 0;
+    // CRITICAL FIX: Always provide meaningful token count for context display
+    const promptTokenCount = ollamaResponse.prompt_eval_count || 
+      (fullPromptText ? this.estimateTokenCount(fullPromptText) : 0);
     const candidatesTokenCount = ollamaResponse.eval_count || 
       this.estimateTokenCount(ollamaResponse.message.content || '');
     
@@ -1100,7 +1131,9 @@ export class OllamaContentGenerator implements ContentGenerator {
         });
       }
       
-      return this.ollamaChatToGeminiResponse(ollamaResponse);
+      // Build prompt for token estimation
+      const estimatedPrompt = messages.map(m => m.content || '').join('\n');
+      return this.ollamaChatToGeminiResponse(ollamaResponse, estimatedPrompt);
     } catch (error) {
       clearTimeout(timeoutId);
       
@@ -1398,7 +1431,9 @@ export class OllamaContentGenerator implements ContentGenerator {
                 // Only yield if there's new content or tool calls
                 if ((ollamaResponse.message && ollamaResponse.message.content) || 
                     (ollamaResponse.message && ollamaResponse.message.tool_calls)) {
-                  const geminiResponse = this.ollamaChatToGeminiResponse(ollamaResponse);
+                  // Build prompt for token estimation
+                  const estimatedPrompt = messages.map(m => m.content || '').join('\n');
+                  const geminiResponse = this.ollamaChatToGeminiResponse(ollamaResponse, estimatedPrompt);
                   
                   // For streaming, only include the new incremental text
                   if (geminiResponse.candidates && geminiResponse.candidates[0] && 
@@ -1685,6 +1720,7 @@ export class OllamaContentGenerator implements ContentGenerator {
       throw new Error(`Failed to get Ollama model info: ${error}`);
     }
   }
+
 
   /**
    * Extract context length from model info
