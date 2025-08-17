@@ -14,7 +14,7 @@ export function setOllamaModelContextLength(modelName: string, contextLength: nu
 }
 
 /**
- * Get the context length for an Ollama model
+ * Get the context length for an Ollama model from cache
  */
 export function getOllamaModelContextLength(modelName: string): number | undefined {
   return ollamaContextLengthCache.get(modelName);

@@ -168,6 +168,10 @@ export class OllamaContentGenerator implements ContentGenerator {
       setOllamaModelContextLength(this.config.model, this.config.contextLimit);
       if (this.config.debugLogging) {
         console.log(`🔍 Set context length from config for ${this.config.model}: ${this.config.contextLimit}`);
+        this.writeDebugLog('CONTEXT_LENGTH_SET_FROM_CONFIG', {
+          model: this.config.model,
+          contextLimit: this.config.contextLimit
+        }).catch(err => console.warn('Failed to log context length config:', err));
       }
     } else {
       // Start async initialization for API fetch
@@ -555,13 +559,33 @@ export class OllamaContentGenerator implements ContentGenerator {
     
     // CRITICAL OPTIMIZATION: Limit request size to prevent model crashes
     // Based on testing: gpt-oss:20b fails at ~20KB, qwen3:30b fails at ~30KB
-    const MAX_REQUEST_SIZE = 18000; // 18KB safe limit for compatibility with all tested models
+    const MAX_REQUEST_SIZE = 20000; // 20KB safe limit for request stability
     
     if (Array.isArray(request.contents)) {
       const conversationMessages = this.buildChatMessages(request.contents as Content[]);
       
-      // Optimize conversation history to fit within size limits
-      const optimizedMessages = this.optimizeConversationForRequestSize(conversationMessages, MAX_REQUEST_SIZE);
+      // First: Check if we need session-level context management (85%+ usage)
+      const contextLimit = getOllamaModelContextLength(this.config.model) || 4096;
+      const currentSessionTokens = conversationMessages.reduce((total, msg) => total + this.estimateTokenCount(msg.content || ''), 0);
+      const sessionUsagePercentage = currentSessionTokens / contextLimit;
+      
+      let finalMessages = conversationMessages;
+      
+      // Session-level context management: Only truncate if approaching context limit
+      if (sessionUsagePercentage > 0.85) { // 85% session usage threshold
+        if (this.config.debugLogging) {
+          this.writeDebugLog('SESSION_CONTEXT_MANAGEMENT_TRIGGERED', {
+            currentSessionTokens,
+            contextLimit,
+            sessionUsagePercentage: (sessionUsagePercentage * 100).toFixed(1) + '%',
+            reason: 'approaching_session_context_limit'
+          }).catch(err => console.warn('Failed to log session context management:', err));
+        }
+        finalMessages = this.manageSessionContext(conversationMessages, contextLimit);
+      }
+      
+      // Second: Optimize for request size (separate from session management)
+      const optimizedMessages = this.optimizeRequestSize(finalMessages, MAX_REQUEST_SIZE);
       messages.push(...optimizedMessages);
     } else if (typeof request.contents === 'string') {
       // Truncate single string content if too large
@@ -605,40 +629,122 @@ export class OllamaContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Optimize conversation history to fit within request size limits
+   * Manage session-level context when approaching context window limits (85%+)
    */
-  private optimizeConversationForRequestSize(messages: OllamaChatMessage[], maxSize: number): OllamaChatMessage[] {
+  private manageSessionContext(messages: OllamaChatMessage[], contextLimit: number): OllamaChatMessage[] {
+    const TARGET_USAGE = 0.75; // Reduce to 75% of context limit
+    const targetTokens = Math.floor(contextLimit * TARGET_USAGE);
+    
+    // Strategy: Remove oldest messages while preserving recent conversation flow
+    let optimizedMessages = [...messages];
+    const systemMessages = optimizedMessages.filter(msg => msg.role === 'system');
+    const nonSystemMessages = optimizedMessages.filter(msg => msg.role !== 'system');
+    
+    // Always preserve recent conversation (last 5 messages minimum)
+    const PRESERVE_RECENT_COUNT = 5;
+    
+    let currentTokens = optimizedMessages.reduce((total, msg) => total + this.estimateTokenCount(msg.content || ''), 0);
+    
+    // Remove older non-system messages until we reach target
+    while (nonSystemMessages.length > PRESERVE_RECENT_COUNT && currentTokens > targetTokens) {
+      const removedMessage = nonSystemMessages.shift();
+      if (removedMessage) {
+        currentTokens -= this.estimateTokenCount(removedMessage.content || '');
+      }
+    }
+    
+    // Rebuild optimized messages
+    optimizedMessages = [...systemMessages, ...nonSystemMessages];
+    
+    if (this.config.debugLogging) {
+      this.writeDebugLog('SESSION_CONTEXT_MANAGED', {
+        originalMessageCount: messages.length,
+        finalMessageCount: optimizedMessages.length,
+        originalTokens: messages.reduce((total, msg) => total + this.estimateTokenCount(msg.content || ''), 0),
+        finalTokens: currentTokens,
+        targetTokens,
+        contextLimit,
+        preservedRecentCount: PRESERVE_RECENT_COUNT
+      }).catch(err => console.warn('Failed to log session context management:', err));
+    }
+    
+    return optimizedMessages;
+  }
+
+  /**
+   * Optimize individual request size to prevent model crashes (20KB limit)
+   */
+  private optimizeRequestSize(messages: OllamaChatMessage[], maxSize: number): OllamaChatMessage[] {
     if (messages.length === 0) return messages;
     
-    // Calculate current size
+    // Calculate current request size (character-based)
     let currentSize = messages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
     
     if (currentSize <= maxSize) {
-      return messages; // Already within limits
+      if (this.config.debugLogging) {
+        this.writeDebugLog('REQUEST_SIZE_OPTIMIZATION_SKIPPED', {
+          messageCount: messages.length,
+          currentSize,
+          maxSize,
+          reason: 'within_request_size_limit'
+        }).catch(err => console.warn('Failed to log request size optimization:', err));
+      }
+      return messages; // Already within request size limits
     }
     
-    // Strategy: Keep the last user message and recent assistant/tool exchanges
-    // Remove large system context from earlier messages
+    // Strategy: Truncate content to fit within request size limit
+    // This is only for preventing model crashes, not for session management
+    let optimizedMessages = [...messages];
     
-    // Always keep the last few messages (most recent conversation)
-    const recentMessages = messages.slice(-5); // Keep last 5 messages
-    let recentSize = recentMessages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
+    // First attempt: Remove oldest messages while preserving recent ones
+    const PRESERVE_RECENT_COUNT = 2; // Keep last 2 messages minimum for request coherence
+    const systemMessages = optimizedMessages.filter(msg => msg.role === 'system');
+    const nonSystemMessages = optimizedMessages.filter(msg => msg.role !== 'system');
     
-    if (recentSize <= maxSize) {
-      return recentMessages;
+    // Remove older non-system messages gradually until within size limit
+    while (nonSystemMessages.length > PRESERVE_RECENT_COUNT && currentSize > maxSize) {
+      const removedMessage = nonSystemMessages.shift();
+      if (removedMessage) {
+        currentSize -= (removedMessage.content?.length || 0);
+      }
     }
     
-    // If even recent messages are too large, truncate the last user message
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage && lastMessage.role === 'user' && lastMessage.content) {
-      const truncatedContent = this.truncateContentForRequestSize(lastMessage.content, maxSize * 0.8); // Use 80% for user message
-      return [{
-        role: lastMessage.role,
-        content: truncatedContent
-      }];
+    // Rebuild optimized messages
+    optimizedMessages = [...systemMessages, ...nonSystemMessages];
+    
+    // If still too large, truncate the largest message
+    currentSize = optimizedMessages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
+    if (currentSize > maxSize && optimizedMessages.length > 0) {
+      // Find the largest non-system message and truncate it
+      const largestMsg = optimizedMessages
+        .filter(msg => msg.role !== 'system')
+        .reduce((largest, msg) => 
+          (msg.content?.length || 0) > (largest.content?.length || 0) ? msg : largest
+        );
+      
+      if (largestMsg && largestMsg.content) {
+        const excessSize = currentSize - maxSize;
+        const targetLength = Math.max(100, largestMsg.content.length - excessSize - 500); // Keep at least 100 chars
+        largestMsg.content = this.truncateContentForRequestSize(largestMsg.content, targetLength);
+      }
     }
     
-    return recentMessages.slice(-2); // Fallback: keep only last 2 messages
+    // Final size calculation
+    const finalSize = optimizedMessages.reduce((total, msg) => total + (msg.content?.length || 0), 0);
+    
+    if (this.config.debugLogging) {
+      this.writeDebugLog('REQUEST_SIZE_OPTIMIZATION_APPLIED', {
+        originalMessageCount: messages.length,
+        finalMessageCount: optimizedMessages.length,
+        originalSize: messages.reduce((total, msg) => total + (msg.content?.length || 0), 0),
+        finalSize,
+        maxSize,
+        preservedRecentCount: PRESERVE_RECENT_COUNT,
+        reason: 'request_size_exceeded'
+      }).catch(err => console.warn('Failed to log request size optimization:', err));
+    }
+    
+    return optimizedMessages;
   }
 
   /**
@@ -711,6 +817,21 @@ export class OllamaContentGenerator implements ContentGenerator {
     usageMetadata.promptTokenCount = promptTokenCount;
     usageMetadata.candidatesTokenCount = candidatesTokenCount;
     usageMetadata.totalTokenCount = promptTokenCount + candidatesTokenCount;
+    
+    // Debug log token counting details
+    if (this.config.debugLogging) {
+      this.writeDebugLog('TOKEN_COUNTING_CHAT', {
+        ollama_prompt_eval_count: ollamaResponse.prompt_eval_count,
+        estimated_prompt_tokens: fullPromptText ? this.estimateTokenCount(fullPromptText) : 0,
+        final_prompt_token_count: promptTokenCount,
+        ollama_eval_count: ollamaResponse.eval_count,
+        estimated_response_tokens: this.estimateTokenCount(ollamaResponse.message.content || ''),
+        final_candidates_token_count: candidatesTokenCount,
+        total_token_count: promptTokenCount + candidatesTokenCount,
+        prompt_text_length: fullPromptText?.length || 0,
+        response_text_length: ollamaResponse.message.content?.length || 0
+      }).catch(err => console.warn('Failed to log token counting debug:', err));
+    }
 
     // Convert Ollama message to Gemini parts
     const parts: any[] = [];
@@ -794,6 +915,21 @@ export class OllamaContentGenerator implements ContentGenerator {
     usageMetadata.promptTokenCount = promptTokenCount;
     usageMetadata.candidatesTokenCount = candidatesTokenCount;
     usageMetadata.totalTokenCount = promptTokenCount + candidatesTokenCount;
+    
+    // Debug log token counting details
+    if (this.config.debugLogging) {
+      this.writeDebugLog('TOKEN_COUNTING_GENERATE', {
+        ollama_prompt_eval_count: ollamaResponse.prompt_eval_count,
+        estimated_prompt_tokens: fullPromptText ? this.estimateTokenCount(fullPromptText) : 0,
+        final_prompt_token_count: promptTokenCount,
+        ollama_eval_count: ollamaResponse.eval_count,
+        estimated_response_tokens: this.estimateTokenCount(ollamaResponse.response),
+        final_candidates_token_count: candidatesTokenCount,
+        total_token_count: promptTokenCount + candidatesTokenCount,
+        prompt_text_length: fullPromptText?.length || 0,
+        response_text_length: ollamaResponse.response?.length || 0
+      }).catch(err => console.warn('Failed to log token counting debug:', err));
+    }
 
     // Convert response to parts (text + function calls)
     const parts: any[] = [];
@@ -1452,6 +1588,18 @@ export class OllamaContentGenerator implements ContentGenerator {
                 if (ollamaResponse.done) {
                   if (this.config.debugLogging) {
                     console.log('📡 Ollama stream marked as done');
+                    // Log the final response with token counts
+                    await this.writeDebugLog('OLLAMA_CHAT_STREAM_FINAL_RESPONSE', {
+                      model: ollamaResponse.model,
+                      done: ollamaResponse.done,
+                      prompt_eval_count: ollamaResponse.prompt_eval_count,
+                      prompt_eval_duration: ollamaResponse.prompt_eval_duration,
+                      eval_count: ollamaResponse.eval_count,
+                      eval_duration: ollamaResponse.eval_duration,
+                      total_duration: ollamaResponse.total_duration,
+                      load_duration: ollamaResponse.load_duration,
+                      fullResponse: ollamaResponse
+                    });
                   }
                   streamCompleted = true;
                   break;
@@ -1634,6 +1782,18 @@ export class OllamaContentGenerator implements ContentGenerator {
                 if (ollamaResponse.done) {
                   if (this.config.debugLogging) {
                     console.log('📡 Ollama generate stream marked as done');
+                    // Log the final response with token counts
+                    await this.writeDebugLog('OLLAMA_GENERATE_STREAM_FINAL_RESPONSE', {
+                      model: ollamaResponse.model,
+                      done: ollamaResponse.done,
+                      prompt_eval_count: ollamaResponse.prompt_eval_count,
+                      prompt_eval_duration: ollamaResponse.prompt_eval_duration,
+                      eval_count: ollamaResponse.eval_count,
+                      eval_duration: ollamaResponse.eval_duration,
+                      total_duration: ollamaResponse.total_duration,
+                      load_duration: ollamaResponse.load_duration,
+                      fullResponse: ollamaResponse
+                    });
                   }
                   streamCompleted = true;
                   break;

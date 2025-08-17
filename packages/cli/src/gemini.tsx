@@ -38,6 +38,7 @@ import {
   logIdeConnection,
   IdeConnectionEvent,
   IdeConnectionType,
+  fetchAndCacheOllamaContextLength,
 } from '@google/gemini-cli-core';
 import { validateAuthMethod } from './config/auth.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
@@ -158,6 +159,23 @@ export async function main() {
     sessionId,
     argv,
   );
+
+  // Initialize Ollama context length if using Ollama
+  if (settings.merged.selectedAuthType === AuthType.USE_OLLAMA && settings.merged.ollamaModel) {
+    try {
+      const contextLength = await fetchAndCacheOllamaContextLength(
+        settings.merged.ollamaModel,
+        settings.merged.ollamaBaseUrl || 'http://localhost:11434'
+      );
+      if (config.getDebugMode()) {
+        console.debug(`🔍 Ollama context length for ${settings.merged.ollamaModel}: ${contextLength}`);
+      }
+    } catch (error) {
+      if (config.getDebugMode()) {
+        console.debug(`⚠️ Failed to fetch context length for ${settings.merged.ollamaModel}:`, error);
+      }
+    }
+  }
 
   const consolePatcher = new ConsolePatcher({
     stderr: true,
