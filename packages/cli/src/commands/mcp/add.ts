@@ -7,7 +7,8 @@
 // File for 'gemini mcp add' command
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
-import { MCPServerConfig } from '@google/gemini-cli-core';
+import { debugLogger, type MCPServerConfig } from '@google/gemini-cli-core';
+import { exitCli } from '../utils.js';
 
 async function addMcpServer(
   name: string,
@@ -36,9 +37,19 @@ async function addMcpServer(
     includeTools,
     excludeTools,
   } = options;
+
+  const settings = loadSettings(process.cwd());
+  const inHome = settings.workspace.path === settings.user.path;
+
+  if (scope === 'project' && inHome) {
+    debugLogger.error(
+      'Error: Please use --scope user to edit settings in the home directory.',
+    );
+    process.exit(1);
+  }
+
   const settingsScope =
     scope === 'user' ? SettingScope.User : SettingScope.Workspace;
-  const settings = loadSettings(process.cwd());
 
   let newServer: Partial<MCPServerConfig> = {};
 
@@ -58,6 +69,7 @@ async function addMcpServer(
     case 'sse':
       newServer = {
         url: commandOrUrl,
+        type: 'sse',
         headers,
         timeout,
         trust,
@@ -68,7 +80,8 @@ async function addMcpServer(
       break;
     case 'http':
       newServer = {
-        httpUrl: commandOrUrl,
+        url: commandOrUrl,
+        type: 'http',
         headers,
         timeout,
         trust,
@@ -106,7 +119,7 @@ async function addMcpServer(
 
   const isExistingServer = !!mcpServers[name];
   if (isExistingServer) {
-    console.log(
+    debugLogger.log(
       `MCP server "${name}" is already configured within ${scope} settings.`,
     );
   }
@@ -115,10 +128,17 @@ async function addMcpServer(
 
   settings.setValue(settingsScope, 'mcpServers', mcpServers);
 
+  if (transport === 'stdio') {
+    debugLogger.warn(
+      'Security Warning: Running MCP servers with stdio transport can expose inherited environment variables. ' +
+        'While the Gemini CLI redacts common API keys and secrets by default, you should only run servers from trusted sources.',
+    );
+  }
+
   if (isExistingServer) {
-    console.log(`MCP server "${name}" updated in ${scope} settings.`);
+    debugLogger.log(`MCP server "${name}" updated in ${scope} settings.`);
   } else {
-    console.log(
+    debugLogger.log(
       `MCP server "${name}" added to ${scope} settings. (${transport})`,
     );
   }
@@ -152,7 +172,7 @@ export const addCommand: CommandModule = {
         choices: ['user', 'project'],
       })
       .option('transport', {
-        alias: 't',
+        alias: ['t', 'type'],
         describe: 'Transport type (stdio, sse, http)',
         type: 'string',
         default: 'stdio',
@@ -163,6 +183,7 @@ export const addCommand: CommandModule = {
         describe: 'Set environment variables (e.g. -e KEY=value)',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('header', {
         alias: 'H',
@@ -170,6 +191,7 @@ export const addCommand: CommandModule = {
           'Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123")',
         type: 'array',
         string: true,
+        nargs: 1,
       })
       .option('timeout', {
         describe: 'Set connection timeout in milliseconds',
@@ -197,26 +219,27 @@ export const addCommand: CommandModule = {
       .middleware((argv) => {
         // Handle -- separator args as server args if present
         if (argv['--']) {
-          const existingArgs = (argv.args as Array<string | number>) || [];
-          argv.args = [...existingArgs, ...(argv['--'] as string[])];
+          const existingArgs = (argv['args'] as Array<string | number>) || [];
+          argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
         }
       }),
   handler: async (argv) => {
     await addMcpServer(
-      argv.name as string,
-      argv.commandOrUrl as string,
-      argv.args as Array<string | number>,
+      argv['name'] as string,
+      argv['commandOrUrl'] as string,
+      argv['args'] as Array<string | number>,
       {
-        scope: argv.scope as string,
-        transport: argv.transport as string,
-        env: argv.env as string[],
-        header: argv.header as string[],
-        timeout: argv.timeout as number | undefined,
-        trust: argv.trust as boolean | undefined,
-        description: argv.description as string | undefined,
-        includeTools: argv.includeTools as string[] | undefined,
-        excludeTools: argv.excludeTools as string[] | undefined,
+        scope: argv['scope'] as string,
+        transport: argv['transport'] as string,
+        env: argv['env'] as string[],
+        header: argv['header'] as string[],
+        timeout: argv['timeout'] as number | undefined,
+        trust: argv['trust'] as boolean | undefined,
+        description: argv['description'] as string | undefined,
+        includeTools: argv['includeTools'] as string[] | undefined,
+        excludeTools: argv['excludeTools'] as string[] | undefined,
       },
     );
+    await exitCli();
   },
 };

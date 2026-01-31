@@ -5,8 +5,16 @@
  */
 
 import { isNodeError } from '../utils/errors.js';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { debugLogger } from './debugLogger.js';
+
+export type Unsubscribe = () => void;
+
+export interface AddDirectoriesResult {
+  added: string[];
+  failed: Array<{ path: string; error: Error }>;
+}
 
 /**
  * WorkspaceContext manages multiple workspace directories and validates paths
@@ -16,37 +24,97 @@ import * as path from 'path';
 export class WorkspaceContext {
   private directories = new Set<string>();
   private initialDirectories: Set<string>;
+  private onDirectoriesChangedListeners = new Set<() => void>();
 
   /**
    * Creates a new WorkspaceContext with the given initial directory and optional additional directories.
-   * @param directory The initial working directory (usually cwd)
+   * @param targetDir The initial working directory (usually cwd)
    * @param additionalDirectories Optional array of additional directories to include
    */
-  constructor(directory: string, additionalDirectories: string[] = []) {
-    this.addDirectory(directory);
-    for (const additionalDirectory of additionalDirectories) {
-      this.addDirectory(additionalDirectory);
-    }
-
+  constructor(
+    readonly targetDir: string,
+    additionalDirectories: string[] = [],
+  ) {
+    this.addDirectory(targetDir);
+    this.addDirectories(additionalDirectories);
     this.initialDirectories = new Set(this.directories);
+  }
+
+  /**
+   * Registers a listener that is called when the workspace directories change.
+   * @param listener The listener to call.
+   * @returns A function to unsubscribe the listener.
+   */
+  onDirectoriesChanged(listener: () => void): Unsubscribe {
+    this.onDirectoriesChangedListeners.add(listener);
+    return () => {
+      this.onDirectoriesChangedListeners.delete(listener);
+    };
+  }
+
+  private notifyDirectoriesChanged() {
+    // Iterate over a copy of the set in case a listener unsubscribes itself or others.
+    for (const listener of [...this.onDirectoriesChangedListeners]) {
+      try {
+        listener();
+      } catch (e) {
+        // Don't let one listener break others.
+        debugLogger.warn(
+          `Error in WorkspaceContext listener: (${e instanceof Error ? e.message : String(e)})`,
+        );
+      }
+    }
   }
 
   /**
    * Adds a directory to the workspace.
    * @param directory The directory path to add (can be relative or absolute)
    * @param basePath Optional base path for resolving relative paths (defaults to cwd)
+   * @throws Error if the directory cannot be added
    */
-  addDirectory(directory: string, basePath: string = process.cwd()): void {
-    this.directories.add(this.resolveAndValidateDir(directory, basePath));
+  addDirectory(directory: string): void {
+    const result = this.addDirectories([directory]);
+    if (result.failed.length > 0) {
+      throw result.failed[0].error;
+    }
   }
 
-  private resolveAndValidateDir(
-    directory: string,
-    basePath: string = process.cwd(),
-  ): string {
-    const absolutePath = path.isAbsolute(directory)
-      ? directory
-      : path.resolve(basePath, directory);
+  /**
+   * Adds multiple directories to the workspace.
+   * Emits a single change event if any directories are added.
+   * @param directories The directory paths to add
+   * @returns Object containing successfully added directories and failures
+   */
+  addDirectories(directories: string[]): AddDirectoriesResult {
+    const result: AddDirectoriesResult = { added: [], failed: [] };
+    let changed = false;
+
+    for (const directory of directories) {
+      try {
+        const resolved = this.resolveAndValidateDir(directory);
+        if (!this.directories.has(resolved)) {
+          this.directories.add(resolved);
+          changed = true;
+        }
+        result.added.push(directory);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        debugLogger.warn(
+          `[WARN] Skipping unreadable directory: ${directory} (${error.message})`,
+        );
+        result.failed.push({ path: directory, error });
+      }
+    }
+
+    if (changed) {
+      this.notifyDirectoriesChanged();
+    }
+
+    return result;
+  }
+
+  private resolveAndValidateDir(directory: string): string {
+    const absolutePath = path.resolve(this.targetDir, directory);
 
     if (!fs.existsSync(absolutePath)) {
       throw new Error(`Directory does not exist: ${absolutePath}`);
@@ -72,9 +140,17 @@ export class WorkspaceContext {
   }
 
   setDirectories(directories: readonly string[]): void {
-    this.directories.clear();
+    const newDirectories = new Set<string>();
     for (const dir of directories) {
-      this.addDirectory(dir);
+      newDirectories.add(this.resolveAndValidateDir(dir));
+    }
+
+    if (
+      newDirectories.size !== this.directories.size ||
+      ![...newDirectories].every((d) => this.directories.has(d))
+    ) {
+      this.directories = newDirectories;
+      this.notifyDirectoriesChanged();
     }
   }
 
@@ -105,7 +181,7 @@ export class WorkspaceContext {
    */
   private fullyResolvedPath(pathToCheck: string): string {
     try {
-      return fs.realpathSync(pathToCheck);
+      return fs.realpathSync(path.resolve(this.targetDir, pathToCheck));
     } catch (e: unknown) {
       if (
         isNodeError(e) &&

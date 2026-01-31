@@ -11,7 +11,8 @@ import {
   useEffect,
   useState,
 } from 'react';
-import { LoadedSettings, SettingScope } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope } from '../../config/settings.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -31,30 +32,28 @@ export const VimModeProvider = ({
   children: React.ReactNode;
   settings: LoadedSettings;
 }) => {
-  const initialVimEnabled = settings.merged.vimMode ?? false;
+  const initialVimEnabled = settings.merged.general.vimMode;
   const [vimEnabled, setVimEnabled] = useState(initialVimEnabled);
-  const [vimMode, setVimMode] = useState<VimMode>(
-    initialVimEnabled ? 'NORMAL' : 'INSERT',
-  );
+  const [vimMode, setVimMode] = useState<VimMode>('INSERT');
 
   useEffect(() => {
     // Initialize vimEnabled from settings on mount
-    const enabled = settings.merged.vimMode ?? false;
+    const enabled = settings.merged.general.vimMode;
     setVimEnabled(enabled);
-    // When vim mode is enabled, always start in NORMAL mode
+    // When vim mode is enabled, start in INSERT mode
     if (enabled) {
-      setVimMode('NORMAL');
+      setVimMode('INSERT');
     }
-  }, [settings.merged.vimMode]);
+  }, [settings.merged.general.vimMode]);
 
   const toggleVimEnabled = useCallback(async () => {
     const newValue = !vimEnabled;
     setVimEnabled(newValue);
-    // When enabling vim mode, start in NORMAL mode
+    // When enabling vim mode, start in INSERT mode
     if (newValue) {
-      setVimMode('NORMAL');
+      setVimMode('INSERT');
     }
-    await settings.setValue(SettingScope.User, 'vimMode', newValue);
+    settings.setValue(SettingScope.User, 'general.vimMode', newValue);
     return newValue;
   }, [vimEnabled, settings]);
 

@@ -5,13 +5,36 @@
  */
 
 // Patch: Unset NO_COLOR at the very top before any imports
-if (process.env.NO_COLOR !== undefined) {
-  delete process.env.NO_COLOR;
+if (process.env['NO_COLOR'] !== undefined) {
+  delete process.env['NO_COLOR'];
 }
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { themeManager, DEFAULT_THEME } from './theme-manager.js';
-import { CustomTheme } from './theme.js';
+import type { CustomTheme } from '@google/gemini-cli-core';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import type * as osActual from 'node:os';
+import { debugLogger } from '@google/gemini-cli-core';
+
+vi.mock('node:fs');
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
+  return {
+    ...actualOs,
+    homedir: vi.fn(),
+    platform: vi.fn(() => 'linux'),
+  };
+});
+
+vi.mock('@google/gemini-cli-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@google/gemini-cli-core')>();
+  return {
+    ...actual,
+    homedir: () => os.homedir(),
+  };
+});
 
 const validCustomTheme: CustomTheme = {
   type: 'custom',
@@ -36,6 +59,10 @@ describe('ThemeManager', () => {
     // Reset themeManager state
     themeManager.loadCustomThemes({});
     themeManager.setActiveTheme(DEFAULT_THEME.name);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('should load valid custom themes', () => {
@@ -87,13 +114,128 @@ describe('ThemeManager', () => {
   });
 
   it('should return NoColorTheme if NO_COLOR is set', () => {
-    const original = process.env.NO_COLOR;
-    process.env.NO_COLOR = '1';
+    const original = process.env['NO_COLOR'];
+    process.env['NO_COLOR'] = '1';
     expect(themeManager.getActiveTheme().name).toBe('NoColor');
     if (original === undefined) {
-      delete process.env.NO_COLOR;
+      delete process.env['NO_COLOR'];
     } else {
-      process.env.NO_COLOR = original;
+      process.env['NO_COLOR'] = original;
     }
+  });
+
+  describe('when loading a theme from a file', () => {
+    const mockThemePath = './my-theme.json';
+    const mockTheme: CustomTheme = {
+      ...validCustomTheme,
+      name: 'My File Theme',
+    };
+
+    beforeEach(() => {
+      vi.mocked(os.homedir).mockReturnValue('/home/user');
+      vi.spyOn(fs, 'realpathSync').mockImplementation((p) => p as string);
+    });
+
+    it('should load a theme from a valid file path', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockTheme));
+
+      const result = themeManager.setActiveTheme('/home/user/my-theme.json');
+
+      expect(result).toBe(true);
+      const activeTheme = themeManager.getActiveTheme();
+      expect(activeTheme.name).toBe('My File Theme');
+      expect(fs.readFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('my-theme.json'),
+        'utf-8',
+      );
+    });
+
+    it('should not load a theme if the file does not exist', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+      const result = themeManager.setActiveTheme(mockThemePath);
+
+      expect(result).toBe(false);
+      expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
+    });
+
+    it('should not load a theme from a file with invalid JSON', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue('invalid json');
+
+      const result = themeManager.setActiveTheme(mockThemePath);
+
+      expect(result).toBe(false);
+      expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
+    });
+
+    it('should not load a theme from an untrusted file path and log a message', () => {
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockTheme));
+      const consoleWarnSpy = vi
+        .spyOn(debugLogger, 'warn')
+        .mockImplementation(() => {});
+
+      const result = themeManager.setActiveTheme('/untrusted/my-theme.json');
+
+      expect(result).toBe(false);
+      expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('is outside your home directory'),
+      );
+
+      consoleWarnSpy.mockRestore();
+    });
+  });
+
+  describe('extension themes', () => {
+    it('should register and unregister themes from extensions with namespacing', () => {
+      const extTheme: CustomTheme = {
+        ...validCustomTheme,
+        name: 'ExtensionTheme',
+      };
+      const extensionName = 'test-extension';
+      const namespacedName = `ExtensionTheme (${extensionName})`;
+
+      themeManager.registerExtensionThemes(extensionName, [extTheme]);
+      expect(themeManager.getCustomThemeNames()).toContain(namespacedName);
+      expect(themeManager.isCustomTheme(namespacedName)).toBe(true);
+
+      themeManager.unregisterExtensionThemes(extensionName, [extTheme]);
+      expect(themeManager.getCustomThemeNames()).not.toContain(namespacedName);
+      expect(themeManager.isCustomTheme(namespacedName)).toBe(false);
+    });
+
+    it('should not allow extension themes to overwrite built-in themes even with prefixing', () => {
+      // availableThemes has 'Ayu'.
+      // We verify that it DOES prefix, so it won't collide even if extension name is similar.
+      themeManager.registerExtensionThemes('Ext', [
+        { ...validCustomTheme, name: 'Theme' },
+      ]);
+      expect(themeManager.getCustomThemeNames()).toContain('Theme (Ext)');
+    });
+
+    it('should allow extension themes and settings themes to coexist', () => {
+      const extTheme: CustomTheme = {
+        ...validCustomTheme,
+        name: 'ExtensionTheme',
+      };
+      const settingsTheme: CustomTheme = {
+        ...validCustomTheme,
+        name: 'SettingsTheme',
+      };
+
+      themeManager.registerExtensionThemes('Ext', [extTheme]);
+      themeManager.loadCustomThemes({ SettingsTheme: settingsTheme });
+
+      expect(themeManager.getCustomThemeNames()).toContain(
+        'ExtensionTheme (Ext)',
+      );
+      expect(themeManager.getCustomThemeNames()).toContain('SettingsTheme');
+
+      expect(themeManager.isCustomTheme('ExtensionTheme (Ext)')).toBe(true);
+      expect(themeManager.isCustomTheme('SettingsTheme')).toBe(true);
+    });
   });
 });

@@ -4,10 +4,38 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import ignore from 'ignore';
 import picomatch from 'picomatch';
+import type { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 
 const hasFileExtension = picomatch('**/*[*.]*');
+
+export function loadIgnoreRules(
+  service: FileDiscoveryService,
+  ignoreDirs: string[] = [],
+): Ignore {
+  const ignorer = new Ignore();
+  const ignoreFiles = service.getAllIgnoreFilePaths();
+
+  for (const filePath of ignoreFiles) {
+    if (fs.existsSync(filePath)) {
+      ignorer.add(fs.readFileSync(filePath, 'utf8'));
+    }
+  }
+
+  const allIgnoreDirs = ['.git', ...ignoreDirs];
+  ignorer.add(
+    allIgnoreDirs.map((dir) => {
+      if (dir.endsWith('/')) {
+        return dir;
+      }
+      return `${dir}/`;
+    }),
+  );
+
+  return ignorer;
+}
 
 export class Ignore {
   private readonly allPatterns: string[] = [];

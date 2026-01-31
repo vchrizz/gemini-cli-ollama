@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { z } from 'zod';
+
 export interface ClientMetadata {
   ideType?: ClientMetadataIdeType;
   ideVersion?: string;
@@ -21,7 +23,8 @@ export type ClientMetadataIdeType =
   | 'INTELLIJ'
   | 'VSCODE_CLOUD_WORKSTATION'
   | 'INTELLIJ_CLOUD_WORKSTATION'
-  | 'CLOUD_SHELL';
+  | 'CLOUD_SHELL'
+  | 'GEMINI_CLI';
 export type ClientMetadataPlatform =
   | 'PLATFORM_UNSPECIFIED'
   | 'DARWIN_AMD64'
@@ -57,8 +60,8 @@ export interface LoadCodeAssistResponse {
  */
 export interface GeminiUserTier {
   id: UserTierId;
-  name: string;
-  description: string;
+  name?: string;
+  description?: string;
   // This value is used to declare whether a given tier requires the user to configure the project setting on the IDE settings or not.
   userDefinedCloudaicompanionProject?: boolean | null;
   isDefault?: boolean;
@@ -79,6 +82,11 @@ export interface IneligibleTier {
   reasonMessage: string;
   tierId: UserTierId;
   tierName: string;
+  validationErrorMessage?: string;
+  validationUrl?: string;
+  validationUrlLinkText?: string;
+  validationLearnMoreUrl?: string;
+  validationLearnMoreLinkText?: string;
 }
 
 /**
@@ -95,6 +103,7 @@ export enum IneligibleTierReasonCode {
   UNKNOWN = 'UNKNOWN',
   UNKNOWN_LOCATION = 'UNKNOWN_LOCATION',
   UNSUPPORTED_LOCATION = 'UNSUPPORTED_LOCATION',
+  VALIDATION_REQUIRED = 'VALIDATION_REQUIRED',
   // go/keep-sorted end
 }
 /**
@@ -176,10 +185,141 @@ export interface HelpLinkUrl {
 
 export interface SetCodeAssistGlobalUserSettingRequest {
   cloudaicompanionProject?: string;
-  freeTierDataCollectionOptin: boolean;
+  freeTierDataCollectionOptin?: boolean;
 }
 
 export interface CodeAssistGlobalUserSettingResponse {
   cloudaicompanionProject?: string;
   freeTierDataCollectionOptin: boolean;
 }
+
+/**
+ * Relevant fields that can be returned from a Google RPC response
+ */
+export interface GoogleRpcResponse {
+  error?: {
+    details?: GoogleRpcErrorInfo[];
+  };
+}
+
+/**
+ * Relevant fields that can be returned in the details of an error returned from GoogleRPCs
+ */
+interface GoogleRpcErrorInfo {
+  reason?: string;
+}
+
+export interface RetrieveUserQuotaRequest {
+  project: string;
+  userAgent?: string;
+}
+
+export interface BucketInfo {
+  remainingAmount?: string;
+  remainingFraction?: number;
+  resetTime?: string;
+  tokenType?: string;
+  modelId?: string;
+}
+
+export interface RetrieveUserQuotaResponse {
+  buckets?: BucketInfo[];
+}
+
+export interface RecordCodeAssistMetricsRequest {
+  project: string;
+  requestId?: string;
+  metadata?: ClientMetadata;
+  metrics?: CodeAssistMetric[];
+}
+
+export interface CodeAssistMetric {
+  timestamp?: string;
+  metricMetadata?: Map<string, string>;
+
+  // The event tied to this metric. Only one of these should be set.
+  conversationOffered?: ConversationOffered;
+  conversationInteraction?: ConversationInteraction;
+}
+
+export enum ConversationInteractionInteraction {
+  UNKNOWN = 0,
+  THUMBSUP = 1,
+  THUMBSDOWN = 2,
+  COPY = 3,
+  INSERT = 4,
+  ACCEPT_CODE_BLOCK = 5,
+  ACCEPT_ALL = 6,
+  ACCEPT_FILE = 7,
+  DIFF = 8,
+  ACCEPT_RANGE = 9,
+}
+
+export enum ActionStatus {
+  ACTION_STATUS_UNSPECIFIED = 0,
+  ACTION_STATUS_NO_ERROR = 1,
+  ACTION_STATUS_ERROR_UNKNOWN = 2,
+  ACTION_STATUS_CANCELLED = 3,
+  ACTION_STATUS_EMPTY = 4,
+}
+
+export enum InitiationMethod {
+  INITIATION_METHOD_UNSPECIFIED = 0,
+  TAB = 1,
+  COMMAND = 2,
+  AGENT = 3,
+}
+
+export interface ConversationOffered {
+  citationCount?: string;
+  includedCode?: boolean;
+  status?: ActionStatus;
+  traceId?: string;
+  streamingLatency?: StreamingLatency;
+  isAgentic?: boolean;
+  initiationMethod?: InitiationMethod;
+}
+
+export interface StreamingLatency {
+  firstMessageLatency?: string;
+  totalLatency?: string;
+}
+
+export interface ConversationInteraction {
+  traceId: string;
+  status?: ActionStatus;
+  interaction?: ConversationInteractionInteraction;
+  acceptedLines?: string;
+  language?: string;
+  isAgentic?: boolean;
+}
+
+export interface FetchAdminControlsRequest {
+  project: string;
+}
+
+export type FetchAdminControlsResponse = z.infer<
+  typeof FetchAdminControlsResponseSchema
+>;
+
+const ExtensionsSettingSchema = z.object({
+  extensionsEnabled: z.boolean().optional(),
+});
+
+const CliFeatureSettingSchema = z.object({
+  extensionsSetting: ExtensionsSettingSchema.optional(),
+  unmanagedCapabilitiesEnabled: z.boolean().optional(),
+});
+
+const McpSettingSchema = z.object({
+  mcpEnabled: z.boolean().optional(),
+  overrideMcpConfigJson: z.string().optional(),
+});
+
+export const FetchAdminControlsResponseSchema = z.object({
+  // TODO: deprecate once backend stops sending this field
+  secureModeEnabled: z.boolean().optional(),
+  strictModeDisabled: z.boolean().optional(),
+  mcpSetting: McpSettingSchema.optional(),
+  cliFeatureSetting: CliFeatureSettingSchema.optional(),
+});

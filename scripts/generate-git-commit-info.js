@@ -17,10 +17,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { execSync } from 'child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
-import { dirname, join, relative } from 'path';
-import { fileURLToPath } from 'url';
+import { execSync } from 'node:child_process';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readPackageUp } from 'read-package-up';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -57,7 +57,7 @@ try {
 
 const fileContent = `/**
  * @license
- * Copyright ${new Date().getFullYear()} Google LLC
+ * Copyright ${new Date().getUTCFullYear()} Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 

@@ -11,13 +11,17 @@ import {
   calculateErrorRate,
   computeSessionStats,
 } from './computeStats.js';
-import { ModelMetrics, SessionMetrics } from '../contexts/SessionContext.js';
+import type {
+  ModelMetrics,
+  SessionMetrics,
+} from '../contexts/SessionContext.js';
 
 describe('calculateErrorRate', () => {
   it('should return 0 if totalRequests is 0', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
+        input: 0,
         prompt: 0,
         candidates: 0,
         total: 0,
@@ -33,6 +37,7 @@ describe('calculateErrorRate', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 10, totalErrors: 2, totalLatencyMs: 0 },
       tokens: {
+        input: 0,
         prompt: 0,
         candidates: 0,
         total: 0,
@@ -50,6 +55,7 @@ describe('calculateAverageLatency', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 1000 },
       tokens: {
+        input: 0,
         prompt: 0,
         candidates: 0,
         total: 0,
@@ -65,6 +71,7 @@ describe('calculateAverageLatency', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 10, totalErrors: 0, totalLatencyMs: 1500 },
       tokens: {
+        input: 0,
         prompt: 0,
         candidates: 0,
         total: 0,
@@ -82,6 +89,7 @@ describe('calculateCacheHitRate', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
+        input: 0,
         prompt: 0,
         candidates: 0,
         total: 0,
@@ -97,6 +105,7 @@ describe('calculateCacheHitRate', () => {
     const metrics: ModelMetrics = {
       api: { totalRequests: 0, totalErrors: 0, totalLatencyMs: 0 },
       tokens: {
+        input: 150,
         prompt: 200,
         candidates: 0,
         total: 0,
@@ -118,8 +127,12 @@ describe('computeSessionStats', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
       },
     };
 
@@ -136,7 +149,10 @@ describe('computeSessionStats', () => {
       successRate: 0,
       agreementRate: 0,
       totalPromptTokens: 0,
+      totalInputTokens: 0,
       totalCachedTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
     });
   });
 
@@ -146,6 +162,7 @@ describe('computeSessionStats', () => {
         'gemini-pro': {
           api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 750 },
           tokens: {
+            input: 10,
             prompt: 10,
             candidates: 10,
             total: 20,
@@ -160,8 +177,12 @@ describe('computeSessionStats', () => {
         totalSuccess: 1,
         totalFail: 0,
         totalDurationMs: 250,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
       },
     };
 
@@ -180,6 +201,7 @@ describe('computeSessionStats', () => {
         'gemini-pro': {
           api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 1000 },
           tokens: {
+            input: 100,
             prompt: 150,
             candidates: 10,
             total: 160,
@@ -194,8 +216,12 @@ describe('computeSessionStats', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
       },
     };
 
@@ -212,8 +238,12 @@ describe('computeSessionStats', () => {
         totalSuccess: 8,
         totalFail: 2,
         totalDurationMs: 1000,
-        totalDecisions: { accept: 6, reject: 2, modify: 2 },
+        totalDecisions: { accept: 6, reject: 2, modify: 2, auto_accept: 0 },
         byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
       },
     };
 
@@ -231,8 +261,12 @@ describe('computeSessionStats', () => {
         totalSuccess: 0,
         totalFail: 0,
         totalDurationMs: 0,
-        totalDecisions: { accept: 0, reject: 0, modify: 0 },
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
         byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
       },
     };
 
@@ -243,5 +277,28 @@ describe('computeSessionStats', () => {
     expect(result.cacheEfficiency).toBe(0);
     expect(result.successRate).toBe(0);
     expect(result.agreementRate).toBe(0);
+  });
+
+  it('should correctly include line counts', () => {
+    const metrics: SessionMetrics = {
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 42,
+        totalLinesRemoved: 18,
+      },
+    };
+
+    const result = computeSessionStats(metrics);
+
+    expect(result.totalLinesAdded).toBe(42);
+    expect(result.totalLinesRemoved).toBe(18);
   });
 });

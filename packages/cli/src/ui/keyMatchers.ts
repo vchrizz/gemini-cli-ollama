@@ -5,56 +5,25 @@
  */
 
 import type { Key } from './hooks/useKeypress.js';
-import {
-  Command,
-  KeyBinding,
-  KeyBindingConfig,
-  defaultKeyBindings,
-} from '../config/keyBindings.js';
+import type { KeyBinding, KeyBindingConfig } from '../config/keyBindings.js';
+import { Command, defaultKeyBindings } from '../config/keyBindings.js';
 
 /**
  * Matches a KeyBinding against an actual Key press
  * Pure data-driven matching logic
  */
 function matchKeyBinding(keyBinding: KeyBinding, key: Key): boolean {
-  // Either key name or sequence must match (but not both should be defined)
-  let keyMatches = false;
-
-  if (keyBinding.key !== undefined) {
-    keyMatches = keyBinding.key === key.name;
-  } else if (keyBinding.sequence !== undefined) {
-    keyMatches = keyBinding.sequence === key.sequence;
-  } else {
-    // Neither key nor sequence defined - invalid binding
-    return false;
-  }
-
-  if (!keyMatches) {
-    return false;
-  }
-
   // Check modifiers - follow original logic:
   // undefined = ignore this modifier (original behavior)
   // true = modifier must be pressed
   // false = modifier must NOT be pressed
-
-  if (keyBinding.ctrl !== undefined && key.ctrl !== keyBinding.ctrl) {
-    return false;
-  }
-
-  if (keyBinding.shift !== undefined && key.shift !== keyBinding.shift) {
-    return false;
-  }
-
-  if (keyBinding.command !== undefined && key.meta !== keyBinding.command) {
-    return false;
-  }
-
-  if (keyBinding.paste !== undefined && key.paste !== keyBinding.paste) {
-    return false;
-  }
-
-  return true;
+  return (
+    keyBinding.key === key.name &&
+    (keyBinding.shift === undefined || key.shift === keyBinding.shift) &&
+    (keyBinding.alt === undefined || key.alt === keyBinding.alt) &&
+    (keyBinding.ctrl === undefined || key.ctrl === keyBinding.ctrl) &&
+    (keyBinding.cmd === undefined || key.cmd === keyBinding.cmd)
+  );
 }
 
 /**

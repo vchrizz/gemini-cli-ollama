@@ -6,7 +6,15 @@
 
 import { describe, it, expect } from 'vitest';
 import { handleVimAction } from './vim-buffer-actions.js';
-import type { TextBufferState } from './text-buffer.js';
+import type { TextBufferState, VisualLayout } from './text-buffer.js';
+
+const defaultVisualLayout: VisualLayout = {
+  visualLines: [''],
+  logicalToVisualMap: [[[0, 0]]],
+  visualToLogicalMap: [[0, 0]],
+  transformedToLogicalMaps: [[]],
+  visualToTransformedMap: [],
+};
 
 // Helper to create test state
 const createTestState = (
@@ -23,6 +31,11 @@ const createTestState = (
   clipboard: null,
   selectionAnchor: null,
   viewportWidth: 80,
+  viewportHeight: 24,
+  transformationsByLine: [[]],
+  visualLayout: defaultVisualLayout,
+  pastedContent: {},
+  expandedPaste: null,
 });
 
 describe('vim-buffer-actions', () => {
@@ -266,7 +279,7 @@ describe('vim-buffer-actions', () => {
 
         const result = handleVimAction(state, action);
         expect(result).toHaveOnlyValidCharacters();
-        expect(result.cursorRow).toBe(1); // Should move to empty line
+        expect(result.cursorRow).toBe(1);
         expect(result.cursorCol).toBe(0); // Beginning of empty line
       });
     });
@@ -331,7 +344,7 @@ describe('vim-buffer-actions', () => {
 
         const result = handleVimAction(state, action);
         expect(result).toHaveOnlyValidCharacters();
-        expect(result.cursorRow).toBe(2); // Should move to line with 'test'
+        expect(result.cursorRow).toBe(2);
         expect(result.cursorCol).toBe(3); // Should be at 't' (end of 'test')
       });
 
@@ -354,7 +367,7 @@ describe('vim-buffer-actions', () => {
           payload: { count: 1 },
         });
         expect(result).toHaveOnlyValidCharacters();
-        expect(result.cursorRow).toBe(1); // Should move to empty line
+        expect(result.cursorRow).toBe(1);
         expect(result.cursorCol).toBe(0); // Empty line has col 0
       });
 
@@ -382,7 +395,7 @@ describe('vim-buffer-actions', () => {
 
       it('should handle precomposed characters with diacritics', () => {
         // Test case with precomposed é for comparison
-        const state = createTestState(['café test'], 0, 0); // Start at 'c'
+        const state = createTestState(['café test'], 0, 0);
 
         // First 'e' command should move to the 'é' (position 3)
         let result = handleVimAction(state, {
@@ -814,7 +827,7 @@ describe('vim-buffer-actions', () => {
         const state = createTestState(['hello world'], 0, 5);
         const action = {
           type: 'vim_change_movement' as const,
-          payload: { movement: 'h', count: 2 },
+          payload: { movement: 'h' as const, count: 2 },
         };
 
         const result = handleVimAction(state, action);
@@ -827,7 +840,7 @@ describe('vim-buffer-actions', () => {
         const state = createTestState(['hello world'], 0, 5);
         const action = {
           type: 'vim_change_movement' as const,
-          payload: { movement: 'l', count: 3 },
+          payload: { movement: 'l' as const, count: 3 },
         };
 
         const result = handleVimAction(state, action);
@@ -840,7 +853,7 @@ describe('vim-buffer-actions', () => {
         const state = createTestState(['line1', 'line2', 'line3'], 0, 2);
         const action = {
           type: 'vim_change_movement' as const,
-          payload: { movement: 'j', count: 2 },
+          payload: { movement: 'j' as const, count: 2 },
         };
 
         const result = handleVimAction(state, action);
@@ -893,7 +906,15 @@ describe('vim-buffer-actions', () => {
 
     it('should preserve undo stack in operations', () => {
       const state = createTestState(['hello'], 0, 0);
-      state.undoStack = [{ lines: ['previous'], cursorRow: 0, cursorCol: 0 }];
+      state.undoStack = [
+        {
+          lines: ['previous'],
+          cursorRow: 0,
+          cursorCol: 0,
+          pastedContent: {},
+          expandedPaste: null,
+        },
+      ];
 
       const action = {
         type: 'vim_delete_char' as const,

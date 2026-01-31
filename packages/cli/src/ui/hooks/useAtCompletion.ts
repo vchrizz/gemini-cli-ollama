@@ -5,11 +5,19 @@
  */
 
 import { useEffect, useReducer, useRef } from 'react';
-import { Config, FileSearch, escapePath } from '@google/gemini-cli-core';
+import { setTimeout as setTimeoutPromise } from 'node:timers/promises';
+import type { Config, FileSearch } from '@google/gemini-cli-core';
 import {
-  Suggestion,
-  MAX_SUGGESTIONS_TO_SHOW,
-} from '../components/SuggestionsDisplay.js';
+  FileSearchFactory,
+  escapePath,
+  FileDiscoveryService,
+} from '@google/gemini-cli-core';
+import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+import { CommandKind } from '../commands/types.js';
+import { AsyncFzf } from 'fzf';
+
+const DEFAULT_SEARCH_TIMEOUT_MS = 5000;
 
 export enum AtCompletionStatus {
   IDLE = 'idle',
@@ -98,6 +106,93 @@ export interface UseAtCompletionProps {
   setIsLoadingSuggestions: (isLoading: boolean) => void;
 }
 
+interface ResourceSuggestionCandidate {
+  searchKey: string;
+  suggestion: Suggestion;
+}
+
+function buildResourceCandidates(
+  config?: Config,
+): ResourceSuggestionCandidate[] {
+  const registry = config?.getResourceRegistry?.();
+  if (!registry) {
+    return [];
+  }
+
+  const resources = registry.getAllResources().map((resource) => {
+    // Use serverName:uri format to disambiguate resources from different MCP servers
+    const prefixedUri = `${resource.serverName}:${resource.uri}`;
+    return {
+      // Include prefixedUri in searchKey so users can search by the displayed format
+      searchKey: `${prefixedUri} ${resource.name ?? ''}`.toLowerCase(),
+      suggestion: {
+        label: prefixedUri,
+        value: prefixedUri,
+      },
+    } satisfies ResourceSuggestionCandidate;
+  });
+
+  return resources;
+}
+
+function buildAgentCandidates(config?: Config): Suggestion[] {
+  const registry = config?.getAgentRegistry?.();
+  if (!registry) {
+    return [];
+  }
+  return registry.getAllDefinitions().map((def) => ({
+    label: def.name,
+    value: def.name,
+    commandKind: CommandKind.AGENT,
+  }));
+}
+
+async function searchResourceCandidates(
+  pattern: string,
+  candidates: ResourceSuggestionCandidate[],
+): Promise<Suggestion[]> {
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const normalizedPattern = pattern.toLowerCase();
+  if (!normalizedPattern) {
+    return candidates
+      .slice(0, MAX_SUGGESTIONS_TO_SHOW)
+      .map((candidate) => candidate.suggestion);
+  }
+
+  const fzf = new AsyncFzf(candidates, {
+    selector: (candidate: ResourceSuggestionCandidate) => candidate.searchKey,
+  });
+  const results = await fzf.find(normalizedPattern, {
+    limit: MAX_SUGGESTIONS_TO_SHOW * 3,
+  });
+  return results.map(
+    (result: { item: ResourceSuggestionCandidate }) => result.item.suggestion,
+  );
+}
+
+async function searchAgentCandidates(
+  pattern: string,
+  candidates: Suggestion[],
+): Promise<Suggestion[]> {
+  if (candidates.length === 0) {
+    return [];
+  }
+  const normalizedPattern = pattern.toLowerCase();
+  if (!normalizedPattern) {
+    return candidates.slice(0, MAX_SUGGESTIONS_TO_SHOW);
+  }
+  const fzf = new AsyncFzf(candidates, {
+    selector: (s: Suggestion) => s.label,
+  });
+  const results = await fzf.find(normalizedPattern, {
+    limit: MAX_SUGGESTIONS_TO_SHOW,
+  });
+  return results.map((r: { item: Suggestion }) => r.item);
+}
+
 export function useAtCompletion(props: UseAtCompletionProps): void {
   const {
     enabled,
@@ -146,9 +241,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     } else if (
       (state.status === AtCompletionStatus.READY ||
         state.status === AtCompletionStatus.SEARCHING) &&
-      pattern !== state.pattern // Only search if the pattern has changed
+      pattern.toLowerCase() !== state.pattern // Only search if the pattern has changed
     ) {
-      dispatch({ type: 'SEARCH', payload: pattern });
+      dispatch({ type: 'SEARCH', payload: pattern.toLowerCase() });
     }
   }, [enabled, pattern, state.status, state.pattern]);
 
@@ -156,18 +251,20 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
   useEffect(() => {
     const initialize = async () => {
       try {
-        const searcher = new FileSearch({
+        const searcher = FileSearchFactory.create({
           projectRoot: cwd,
           ignoreDirs: [],
-          useGitignore:
-            config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
-          useGeminiignore:
-            config?.getFileFilteringOptions()?.respectGeminiIgnore ?? true,
+          fileDiscoveryService: new FileDiscoveryService(
+            cwd,
+            config?.getFileFilteringOptions(),
+          ),
           cache: true,
           cacheTtl: 30, // 30 seconds
-          maxDepth: !(config?.getEnableRecursiveFileSearch() ?? true)
-            ? 0
-            : undefined,
+          enableRecursiveFileSearch:
+            config?.getEnableRecursiveFileSearch() ?? true,
+          enableFuzzySearch:
+            config?.getFileFilteringEnableFuzzySearch() ?? true,
+          maxFiles: config?.getFileFilteringOptions()?.maxFileCount,
         });
         await searcher.initialize();
         fileSearch.current = searcher;
@@ -196,6 +293,22 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         dispatch({ type: 'SET_LOADING', payload: true });
       }, 200);
 
+      const timeoutMs =
+        config?.getFileFilteringOptions()?.searchTimeout ??
+        DEFAULT_SEARCH_TIMEOUT_MS;
+
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      (async () => {
+        try {
+          await setTimeoutPromise(timeoutMs, undefined, {
+            signal: controller.signal,
+          });
+          controller.abort();
+        } catch {
+          // ignore
+        }
+      })();
+
       try {
         const results = await fileSearch.current.search(state.pattern, {
           signal: controller.signal,
@@ -210,21 +323,49 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           return;
         }
 
-        const suggestions = results.map((p) => ({
+        const fileSuggestions = results.map((p) => ({
           label: p,
           value: escapePath(p),
         }));
-        dispatch({ type: 'SEARCH_SUCCESS', payload: suggestions });
+
+        const resourceCandidates = buildResourceCandidates(config);
+        const resourceSuggestions = (
+          await searchResourceCandidates(
+            state.pattern ?? '',
+            resourceCandidates,
+          )
+        ).map((suggestion) => ({
+          ...suggestion,
+          label: suggestion.label.replace(/^@/, ''),
+          value: suggestion.value.replace(/^@/, ''),
+        }));
+
+        const agentCandidates = buildAgentCandidates(config);
+        const agentSuggestions = await searchAgentCandidates(
+          state.pattern ?? '',
+          agentCandidates,
+        );
+
+        const combinedSuggestions = [
+          ...agentSuggestions,
+          ...fileSuggestions,
+          ...resourceSuggestions,
+        ];
+        dispatch({ type: 'SEARCH_SUCCESS', payload: combinedSuggestions });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
           dispatch({ type: 'ERROR' });
         }
+      } finally {
+        controller.abort();
       }
     };
 
     if (state.status === AtCompletionStatus.INITIALIZING) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
       initialize();
     } else if (state.status === AtCompletionStatus.SEARCHING) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
       search();
     }
 

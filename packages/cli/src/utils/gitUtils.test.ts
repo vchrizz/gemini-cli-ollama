@@ -5,7 +5,7 @@
  */
 
 import { vi, describe, expect, it, afterEach, beforeEach } from 'vitest';
-import * as child_process from 'child_process';
+import * as child_process from 'node:child_process';
 import {
   isGitHubRepository,
   getGitRepoRoot,
@@ -76,6 +76,105 @@ describe('getGitHubRepoInfo', async () => {
     );
     expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
   });
+
+  // --- Tests for credential formats ---
+
+  it('returns the owner and repo for URL with classic PAT token (ghp_)', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for URL with fine-grained PAT token (github_pat_)', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://github_pat_xxxxxxxxxxxxxxxxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for URL with username:password format', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://username:password@github.com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for URL with OAuth token (oauth2:token)', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://oauth2:gho_xxxxxxxxxxxx@github.com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for URL with GitHub Actions token (x-access-token)', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://x-access-token:ghs_xxxxxxxxxxxx@github.com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  // --- Tests for case insensitivity ---
+
+  it('returns the owner and repo for URL with uppercase GITHUB.COM', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://GITHUB.COM/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('returns the owner and repo for URL with mixed case GitHub.Com', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://GitHub.Com/owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  // --- Tests for SSH format ---
+
+  it('returns the owner and repo for SSH URL', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'git@github.com:owner/repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('throws for non-GitHub SSH URL', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'git@gitlab.com:owner/repo.git',
+    );
+    expect(() => {
+      getGitHubRepoInfo();
+    }).toThrowError(/Owner & repo could not be extracted from remote URL/);
+  });
+
+  // --- Tests for edge cases ---
+
+  it('returns the owner and repo for URL without .git suffix', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://github.com/owner/repo',
+    );
+    expect(getGitHubRepoInfo()).toEqual({ owner: 'owner', repo: 'repo' });
+  });
+
+  it('throws for non-GitHub HTTPS URL', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://gitlab.com/owner/repo.git',
+    );
+    expect(() => {
+      getGitHubRepoInfo();
+    }).toThrowError(/Owner & repo could not be extracted from remote URL/);
+  });
+
+  it('handles repo names containing .git substring', async () => {
+    vi.mocked(child_process.execSync).mockReturnValueOnce(
+      'https://github.com/owner/my.git.repo.git',
+    );
+    expect(getGitHubRepoInfo()).toEqual({
+      owner: 'owner',
+      repo: 'my.git.repo',
+    });
+  });
 });
 
 describe('getGitRepoRoot', async () => {
@@ -120,7 +219,7 @@ describe('getLatestRelease', async () => {
 
   it('throws an error if the fetch fails', async () => {
     global.fetch = vi.fn(() => Promise.reject('nope'));
-    expect(getLatestGitHubRelease()).rejects.toThrowError(
+    await expect(getLatestGitHubRelease()).rejects.toThrowError(
       /Unable to determine the latest/,
     );
   });
@@ -132,7 +231,7 @@ describe('getLatestRelease', async () => {
         json: () => Promise.resolve({ foo: 'bar' }),
       } as Response),
     );
-    expect(getLatestGitHubRelease()).rejects.toThrowError(
+    await expect(getLatestGitHubRelease()).rejects.toThrowError(
       /Unable to determine the latest/,
     );
   });
@@ -144,6 +243,6 @@ describe('getLatestRelease', async () => {
         json: () => Promise.resolve({ tag_name: 'v1.2.3' }),
       } as Response),
     );
-    expect(getLatestGitHubRelease()).resolves.toBe('v1.2.3');
+    await expect(getLatestGitHubRelease()).resolves.toBe('v1.2.3');
   });
 });

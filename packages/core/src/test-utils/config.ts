@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Config, ConfigParameters } from '../config/config.js';
+import type { ConfigParameters } from '../config/config.js';
+import { Config } from '../config/config.js';
 
 /**
  * Default parameters used for {@link FAKE_CONFIG}
@@ -20,7 +21,7 @@ export const DEFAULT_CONFIG_PARAMETERS: ConfigParameters = {
 };
 
 /**
- * Produces a config.  Default paramters are set to
+ * Produces a config.  Default parameters are set to
  * {@link DEFAULT_CONFIG_PARAMETERS}, optionally, fields can be specified to
  * override those defaults.
  */

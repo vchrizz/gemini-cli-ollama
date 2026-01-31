@@ -11,22 +11,22 @@ import { Dracula } from './dracula.js';
 import { GitHubDark } from './github-dark.js';
 import { GitHubLight } from './github-light.js';
 import { GoogleCode } from './googlecode.js';
+import { Holiday } from './holiday.js';
 import { DefaultLight } from './default-light.js';
 import { DefaultDark } from './default.js';
 import { ShadesOfPurple } from './shades-of-purple.js';
 import { XCode } from './xcode.js';
-import {
-  Theme,
-  ThemeType,
-  CustomTheme,
-  createCustomTheme,
-  validateCustomTheme,
-} from './theme.js';
-import { SemanticColors } from './semantic-tokens.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { Theme, ThemeType } from './theme.js';
+import type { CustomTheme } from '@google/gemini-cli-core';
+import { createCustomTheme, validateCustomTheme } from './theme.js';
+import type { SemanticColors } from './semantic-tokens.js';
 import { ANSI } from './ansi.js';
 import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
 import process from 'node:process';
+import { debugLogger, homedir } from '@google/gemini-cli-core';
 
 export interface ThemeDisplay {
   name: string;
@@ -39,7 +39,9 @@ export const DEFAULT_THEME: Theme = DefaultDark;
 class ThemeManager {
   private readonly availableThemes: Theme[];
   private activeTheme: Theme;
-  private customThemes: Map<string, Theme> = new Map();
+  private settingsThemes: Map<string, Theme> = new Map();
+  private extensionThemes: Map<string, Theme> = new Map();
+  private fileThemes: Map<string, Theme> = new Map();
 
   constructor() {
     this.availableThemes = [
@@ -52,6 +54,7 @@ class ThemeManager {
       GitHubDark,
       GitHubLight,
       GoogleCode,
+      Holiday,
       ShadesOfPurple,
       XCode,
       ANSI,
@@ -65,7 +68,7 @@ class ThemeManager {
    * @param customThemesSettings Custom themes from settings.
    */
   loadCustomThemes(customThemesSettings?: Record<string, CustomTheme>): void {
-    this.customThemes.clear();
+    this.settingsThemes.clear();
 
     if (!customThemesSettings) {
       return;
@@ -77,7 +80,7 @@ class ThemeManager {
       const validation = validateCustomTheme(customThemeConfig);
       if (validation.isValid) {
         if (validation.warning) {
-          console.warn(`Theme "${name}": ${validation.warning}`);
+          debugLogger.warn(`Theme "${name}": ${validation.warning}`);
         }
         const themeWithDefaults: CustomTheme = {
           ...DEFAULT_THEME.colors,
@@ -88,22 +91,109 @@ class ThemeManager {
 
         try {
           const theme = createCustomTheme(themeWithDefaults);
-          this.customThemes.set(name, theme);
+          this.settingsThemes.set(name, theme);
         } catch (error) {
-          console.warn(`Failed to load custom theme "${name}":`, error);
+          debugLogger.warn(`Failed to load custom theme "${name}":`, error);
         }
       } else {
-        console.warn(`Invalid custom theme "${name}": ${validation.error}`);
+        debugLogger.warn(`Invalid custom theme "${name}": ${validation.error}`);
       }
     }
-    // If the current active theme is a custom theme, keep it if still valid
+    // If the current active theme is a settings theme, keep it if still valid
     if (
       this.activeTheme &&
       this.activeTheme.type === 'custom' &&
-      this.customThemes.has(this.activeTheme.name)
+      this.settingsThemes.has(this.activeTheme.name)
     ) {
-      this.activeTheme = this.customThemes.get(this.activeTheme.name)!;
+      this.activeTheme = this.settingsThemes.get(this.activeTheme.name)!;
     }
+  }
+
+  /**
+   * Loads custom themes from extensions.
+   * @param extensionName The name of the extension providing the themes.
+   * @param customThemes Custom themes from extensions.
+   */
+  registerExtensionThemes(
+    extensionName: string,
+    customThemes?: CustomTheme[],
+  ): void {
+    if (!customThemes) {
+      return;
+    }
+
+    debugLogger.log(
+      `Registering extension themes for "${extensionName}":`,
+      customThemes,
+    );
+
+    for (const customThemeConfig of customThemes) {
+      const namespacedName = `${customThemeConfig.name} (${extensionName})`;
+
+      // Check for collisions with built-in themes (unlikely with prefix, but safe)
+      if (this.availableThemes.some((t) => t.name === namespacedName)) {
+        debugLogger.warn(
+          `Theme name collision: "${namespacedName}" is a built-in theme. Skipping.`,
+        );
+        continue;
+      }
+
+      const validation = validateCustomTheme(customThemeConfig);
+      if (validation.isValid) {
+        if (validation.warning) {
+          debugLogger.warn(`Theme "${namespacedName}": ${validation.warning}`);
+        }
+        const themeWithDefaults: CustomTheme = {
+          ...DEFAULT_THEME.colors,
+          ...customThemeConfig,
+          name: namespacedName,
+          type: 'custom',
+        };
+
+        try {
+          const theme = createCustomTheme(themeWithDefaults);
+          this.extensionThemes.set(namespacedName, theme);
+          debugLogger.log(`Registered theme: ${namespacedName}`);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to load custom theme "${namespacedName}":`,
+            error,
+          );
+        }
+      } else {
+        debugLogger.warn(
+          `Invalid custom theme "${namespacedName}": ${validation.error}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Unregisters custom themes from extensions.
+   * @param extensionName The name of the extension.
+   * @param customThemes Custom themes to unregister.
+   */
+  unregisterExtensionThemes(
+    extensionName: string,
+    customThemes?: CustomTheme[],
+  ): void {
+    if (!customThemes) {
+      return;
+    }
+
+    for (const theme of customThemes) {
+      const namespacedName = `${theme.name} (${extensionName})`;
+      this.extensionThemes.delete(namespacedName);
+      debugLogger.log(`Unregistered theme: ${namespacedName}`);
+    }
+  }
+
+  /**
+   * Clears all registered extension themes.
+   * This is primarily for testing purposes to reset state between tests.
+   */
+  clearExtensionThemes(): void {
+    this.extensionThemes.clear();
   }
 
   /**
@@ -125,13 +215,35 @@ class ThemeManager {
    * @returns The active theme.
    */
   getActiveTheme(): Theme {
-    if (process.env.NO_COLOR) {
+    if (process.env['NO_COLOR']) {
       return NoColorTheme;
     }
-    // Ensure the active theme is always valid (fall back to default if not)
-    if (!this.activeTheme || !this.findThemeByName(this.activeTheme.name)) {
-      this.activeTheme = DEFAULT_THEME;
+
+    if (this.activeTheme) {
+      const isBuiltIn = this.availableThemes.some(
+        (t) => t.name === this.activeTheme.name,
+      );
+      const isCustom =
+        [...this.settingsThemes.values()].includes(this.activeTheme) ||
+        [...this.extensionThemes.values()].includes(this.activeTheme) ||
+        [...this.fileThemes.values()].includes(this.activeTheme);
+
+      if (isBuiltIn || isCustom) {
+        return this.activeTheme;
+      }
+
+      // If the theme object is no longer valid, try to find it again by name.
+      // This handles the case where extensions are reloaded and theme objects
+      // are re-created.
+      const reloadedTheme = this.findThemeByName(this.activeTheme.name);
+      if (reloadedTheme) {
+        this.activeTheme = reloadedTheme;
+        return this.activeTheme;
+      }
     }
+
+    // Fallback to default if no active theme or if it's no longer valid.
+    this.activeTheme = DEFAULT_THEME;
     return this.activeTheme;
   }
 
@@ -143,12 +255,20 @@ class ThemeManager {
     return this.getActiveTheme().semanticColors;
   }
 
+  private _getAllCustomThemes(): Theme[] {
+    return [
+      ...Array.from(this.settingsThemes.values()),
+      ...Array.from(this.extensionThemes.values()),
+      ...Array.from(this.fileThemes.values()),
+    ];
+  }
+
   /**
    * Gets a list of custom theme names.
    * @returns Array of custom theme names.
    */
   getCustomThemeNames(): string[] {
-    return Array.from(this.customThemes.keys());
+    return this._getAllCustomThemes().map((theme) => theme.name);
   }
 
   /**
@@ -157,7 +277,11 @@ class ThemeManager {
    * @returns True if the theme is custom.
    */
   isCustomTheme(themeName: string): boolean {
-    return this.customThemes.has(themeName);
+    return (
+      this.settingsThemes.has(themeName) ||
+      this.extensionThemes.has(themeName) ||
+      this.fileThemes.has(themeName)
+    );
   }
 
   /**
@@ -170,13 +294,11 @@ class ThemeManager {
       isCustom: false,
     }));
 
-    const customThemes = Array.from(this.customThemes.values()).map(
-      (theme) => ({
-        name: theme.name,
-        type: theme.type,
-        isCustom: true,
-      }),
-    );
+    const customThemes = this._getAllCustomThemes().map((theme) => ({
+      name: theme.name,
+      type: theme.type,
+      isCustom: true,
+    }));
 
     const allThemes = [...builtInThemes, ...customThemes];
 
@@ -215,6 +337,84 @@ class ThemeManager {
     return this.findThemeByName(themeName);
   }
 
+  /**
+   * Gets all available themes.
+   * @returns A list of all available themes.
+   */
+  getAllThemes(): Theme[] {
+    return [...this.availableThemes, ...this._getAllCustomThemes()];
+  }
+
+  private isPath(themeName: string): boolean {
+    return (
+      themeName.endsWith('.json') ||
+      themeName.startsWith('.') ||
+      path.isAbsolute(themeName)
+    );
+  }
+
+  private loadThemeFromFile(themePath: string): Theme | undefined {
+    try {
+      // realpathSync resolves the path and throws if it doesn't exist.
+      const canonicalPath = fs.realpathSync(path.resolve(themePath));
+
+      // 1. Check cache using the canonical path.
+      if (this.fileThemes.has(canonicalPath)) {
+        return this.fileThemes.get(canonicalPath);
+      }
+
+      // 2. Perform security check.
+      const homeDir = path.resolve(homedir());
+      if (!canonicalPath.startsWith(homeDir)) {
+        debugLogger.warn(
+          `Theme file at "${themePath}" is outside your home directory. ` +
+            `Only load themes from trusted sources.`,
+        );
+        return undefined;
+      }
+
+      // 3. Read, parse, and validate the theme file.
+      const themeContent = fs.readFileSync(canonicalPath, 'utf-8');
+      const customThemeConfig = JSON.parse(themeContent) as CustomTheme;
+
+      const validation = validateCustomTheme(customThemeConfig);
+      if (!validation.isValid) {
+        debugLogger.warn(
+          `Invalid custom theme from file "${themePath}": ${validation.error}`,
+        );
+        return undefined;
+      }
+
+      if (validation.warning) {
+        debugLogger.warn(`Theme from "${themePath}": ${validation.warning}`);
+      }
+
+      // 4. Create and cache the theme.
+      const themeWithDefaults: CustomTheme = {
+        ...DEFAULT_THEME.colors,
+        ...customThemeConfig,
+        name: customThemeConfig.name || canonicalPath,
+        type: 'custom',
+      };
+
+      const theme = createCustomTheme(themeWithDefaults);
+      this.fileThemes.set(canonicalPath, theme); // Cache by canonical path
+      return theme;
+    } catch (error) {
+      // Any error in the process (file not found, bad JSON, etc.) is caught here.
+      // We can return undefined silently for file-not-found, and warn for others.
+      if (
+        !(error instanceof Error && 'code' in error && error.code === 'ENOENT')
+      ) {
+        debugLogger.warn(
+          `Could not load theme from file "${themePath}":`,
+          error,
+        );
+      }
+      return undefined;
+    }
+  }
+
   findThemeByName(themeName: string | undefined): Theme | undefined {
     if (!themeName) {
       return DEFAULT_THEME;
@@ -228,8 +428,26 @@ class ThemeManager {
       return builtInTheme;
     }
 
-    // Then check custom themes
-    return this.customThemes.get(themeName);
+    // Then check custom themes that have been loaded from settings, extensions, or file paths
+    if (this.isPath(themeName)) {
+      return this.loadThemeFromFile(themeName);
+    }
+
+    if (this.settingsThemes.has(themeName)) {
+      return this.settingsThemes.get(themeName);
+    }
+
+    if (this.extensionThemes.has(themeName)) {
+      return this.extensionThemes.get(themeName);
+    }
+
+    if (this.fileThemes.has(themeName)) {
+      return this.fileThemes.get(themeName);
+    }
+
+    // If it's not a built-in, not in cache, and not a valid file path,
+    // it's not a valid theme.
+    return undefined;
   }
 }
 

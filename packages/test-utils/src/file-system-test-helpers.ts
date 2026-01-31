@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
 /**
  * Defines the structure of a virtual file system to be created for testing.
@@ -66,12 +66,12 @@ async function create(dir: string, structure: FileSystemStructure) {
         if (typeof item === 'string') {
           await fs.writeFile(path.join(newPath, item), '');
         } else {
-          await create(newPath, item as FileSystemStructure);
+          await create(newPath, item);
         }
       }
     } else if (typeof content === 'object' && content !== null) {
       await fs.mkdir(newPath, { recursive: true });
-      await create(newPath, content as FileSystemStructure);
+      await create(newPath, content);
     }
   }
 }

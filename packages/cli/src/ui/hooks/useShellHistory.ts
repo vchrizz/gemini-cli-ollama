@@ -5,11 +5,10 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { isNodeError, getProjectTempDir } from '@google/gemini-cli-core';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { debugLogger, isNodeError, Storage } from '@google/gemini-cli-core';
 
-const HISTORY_FILE = 'shell_history';
 const MAX_HISTORY_LENGTH = 100;
 
 export interface UseShellHistoryReturn {
@@ -20,9 +19,12 @@ export interface UseShellHistoryReturn {
   resetHistoryPosition: () => void;
 }
 
-async function getHistoryFilePath(projectRoot: string): Promise<string> {
-  const historyDir = getProjectTempDir(projectRoot);
-  return path.join(historyDir, HISTORY_FILE);
+async function getHistoryFilePath(
+  projectRoot: string,
+  configStorage?: Storage,
+): Promise<string> {
+  const storage = configStorage ?? new Storage(projectRoot);
+  return storage.getHistoryFilePath();
 }
 
 // Handle multiline commands
@@ -50,7 +52,7 @@ async function readHistoryFile(filePath: string): Promise<string[]> {
     return result;
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return [];
-    console.error('Error reading history:', err);
+    debugLogger.error('Error reading history:', err);
     return [];
   }
 }
@@ -63,24 +65,28 @@ async function writeHistoryFile(
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, history.join('\n'));
   } catch (error) {
-    console.error('Error writing shell history:', error);
+    debugLogger.error('Error writing shell history:', error);
   }
 }
 
-export function useShellHistory(projectRoot: string): UseShellHistoryReturn {
+export function useShellHistory(
+  projectRoot: string,
+  storage?: Storage,
+): UseShellHistoryReturn {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [historyFilePath, setHistoryFilePath] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadHistory() {
-      const filePath = await getHistoryFilePath(projectRoot);
+      const filePath = await getHistoryFilePath(projectRoot, storage);
       setHistoryFilePath(filePath);
       const loadedHistory = await readHistoryFile(filePath);
       setHistory(loadedHistory.reverse()); // Newest first
     }
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     loadHistory();
-  }, [projectRoot]);
+  }, [projectRoot, storage]);
 
   const addCommandToHistory = useCallback(
     (command: string) => {
@@ -92,6 +98,7 @@ export function useShellHistory(projectRoot: string): UseShellHistoryReturn {
         .filter(Boolean);
       setHistory(newHistory);
       // Write to file in reverse order (oldest first)
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
       writeHistoryFile(historyFilePath, [...newHistory].reverse());
       setHistoryIndex(-1);
     },

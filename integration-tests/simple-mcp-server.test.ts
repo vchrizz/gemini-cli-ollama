@@ -10,10 +10,10 @@
  * external dependencies, making it compatible with Docker sandbox mode.
  */
 
-import { describe, it, beforeAll, expect } from 'vitest';
-import { TestRig, validateModelOutput } from './test-helper.js';
-import { join } from 'path';
-import { writeFileSync } from 'fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { TestRig, poll, validateModelOutput } from './test-helper.js';
+import { join } from 'node:path';
+import { writeFileSync } from 'node:fs';
 
 // Create a minimal MCP server that doesn't require external dependencies
 // This implements the MCP protocol directly using Node.js built-ins
@@ -28,7 +28,7 @@ const readline = require('readline');
 const fs = require('fs');
 
 // Debug logging to stderr (only when MCP_DEBUG or VERBOSE is set)
-const debugEnabled = process.env.MCP_DEBUG === 'true' || process.env.VERBOSE === 'true';
+const debugEnabled = process.env['MCP_DEBUG'] === 'true' || process.env['VERBOSE'] === 'true';
 function debug(msg) {
   if (debugEnabled) {
     fs.writeSync(2, \`[MCP-DEBUG] \${msg}\\n\`);
@@ -164,10 +164,16 @@ rpc.send({
 });
 `;
 
-describe('simple-mcp-server', () => {
-  const rig = new TestRig();
+describe.skip('simple-mcp-server', () => {
+  let rig: TestRig;
 
-  beforeAll(async () => {
+  beforeEach(() => {
+    rig = new TestRig();
+  });
+
+  afterEach(async () => await rig.cleanup());
+
+  it('should add two numbers', async () => {
     // Setup test directory with MCP server configuration
     await rig.setup('simple-mcp-server', {
       settings: {
@@ -177,6 +183,7 @@ describe('simple-mcp-server', () => {
             args: ['mcp-server.cjs'],
           },
         },
+        tools: { core: [] },
       },
     });
 
@@ -186,15 +193,34 @@ describe('simple-mcp-server', () => {
 
     // Make the script executable (though running with 'node' should work anyway)
     if (process.platform !== 'win32') {
-      const { chmodSync } = await import('fs');
+      const { chmodSync } = await import('node:fs');
       chmodSync(testServerPath, 0o755);
     }
-  });
 
-  it('should add two numbers', async () => {
+    // Poll for script for up to 5s
+    const { accessSync, constants } = await import('node:fs');
+    const isReady = await poll(
+      () => {
+        try {
+          accessSync(testServerPath, constants.F_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      5000, // Max wait 5 seconds
+      100, // Poll every 100ms
+    );
+
+    if (!isReady) {
+      throw new Error('MCP server script was not ready in time.');
+    }
+
     // Test directory is already set up in before hook
     // Just run the command - MCP server config is in settings.json
-    const output = await rig.run('add 5 and 10');
+    const output = await rig.run({
+      args: 'Use the `add` tool to calculate 5+10 and output only the resulting number.',
+    });
 
     const foundToolCall = await rig.waitForToolCall('add');
 

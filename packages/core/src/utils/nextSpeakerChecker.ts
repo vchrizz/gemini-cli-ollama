@@ -4,12 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Content } from '@google/genai';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
-import { GeminiClient } from '../core/client.js';
-import { GeminiChat } from '../core/geminiChat.js';
+import type { Content } from '@google/genai';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { debugLogger } from './debugLogger.js';
 
 const CHECK_PROMPT = `Analyze *only* the content and structure of your immediately preceding response (your last turn in the conversation history). Based *strictly* on that response, determine who should logically speak next: the 'user' or the 'model' (you).
 **Decision Rules (apply in order):**
@@ -42,8 +41,9 @@ export interface NextSpeakerResponse {
 
 export async function checkNextSpeaker(
   chat: GeminiChat,
-  geminiClient: GeminiClient,
+  baseLlmClient: BaseLlmClient,
   abortSignal: AbortSignal,
+  promptId: string,
 ): Promise<NextSpeakerResponse | null> {
   // We need to capture the curated history because there are many moments when the model will return invalid turns
   // that when passed back up to the endpoint will break subsequent calls. An example of this is when the model decides
@@ -109,40 +109,13 @@ export async function checkNextSpeaker(
   ];
 
   try {
-    // For Ollama, use the configured model instead of hardcoded Gemini Flash model
-    const authType = geminiClient.getAuthType();
-    const modelToUse = authType === AuthType.USE_OLLAMA ? undefined : DEFAULT_GEMINI_FLASH_MODEL;
-    
-    // For Ollama, use a simpler fallback approach due to JSON schema limitations
-    if (authType === AuthType.USE_OLLAMA) {
-      // For now, skip the complex JSON schema analysis for Ollama
-      // and use a simple heuristic: if the last message ends with a question, user should speak next
-      if (lastMessage && lastMessage.parts) {
-        const lastPart = lastMessage.parts[lastMessage.parts.length - 1];
-        if (lastPart && 'text' in lastPart && lastPart.text) {
-          const text = lastPart.text.trim();
-          if (text.endsWith('?')) {
-            return {
-              reasoning: 'Last response ended with a question, so user should respond',
-              next_speaker: 'user'
-            };
-          }
-        }
-      }
-      
-      // Default: user should speak next (most common case)
-      return {
-        reasoning: 'Default behavior for conversation flow',
-        next_speaker: 'user'
-      };
-    }
-    
-    const parsedResponse = (await geminiClient.generateJson(
+    const parsedResponse = (await baseLlmClient.generateJson({
+      modelConfigKey: { model: 'next-speaker-checker' },
       contents,
-      RESPONSE_SCHEMA,
+      schema: RESPONSE_SCHEMA,
       abortSignal,
-      modelToUse,
-    )) as unknown as NextSpeakerResponse;
+      promptId,
+    })) as unknown as NextSpeakerResponse;
 
     if (
       parsedResponse &&
@@ -153,7 +126,7 @@ export async function checkNextSpeaker(
     }
     return null;
   } catch (error) {
-    console.warn(
+    debugLogger.warn(
       'Failed to talk to Gemini endpoint when seeing if conversation should continue.',
       error,
     );

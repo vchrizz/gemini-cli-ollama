@@ -4,149 +4,224 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  EmbedContentParameters,
+import type {
   GenerateContentConfig,
   PartListUnion,
   Content,
   Tool,
   GenerateContentResponse,
 } from '@google/genai';
+import { createUserContent } from '@google/genai';
 import {
   getDirectoryContextString,
-  getEnvironmentContext,
+  getInitialChatHistory,
 } from '../utils/environmentContext.js';
-import {
-  Turn,
-  ServerGeminiStreamEvent,
-  GeminiEventType,
-  ChatCompressionInfo,
-} from './turn.js';
-import { Config } from '../config/config.js';
-import { UserTierId } from '../code_assist/types.js';
-import { getCoreSystemPrompt, getCompressionPrompt } from './prompts.js';
-import { getResponseText } from '../utils/generateContentResponseUtilities.js';
+import type { ServerGeminiStreamEvent, ChatCompressionInfo } from './turn.js';
+import { CompressionStatus } from './turn.js';
+import { Turn, GeminiEventType } from './turn.js';
+import type { Config } from '../config/config.js';
+import { getCoreSystemPrompt } from './prompts.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { reportError } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
 import { retryWithBackoff } from '../utils/retry.js';
+import type { ValidationRequiredError } from '../utils/googleQuotaErrors.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { tokenLimit } from './tokenLimits.js';
-import {
-  AuthType,
-  ContentGenerator,
-  ContentGeneratorConfig,
-  createContentGenerator,
-} from './contentGenerator.js';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
+import type {
+  ChatRecordingService,
+  ResumedSessionData,
+} from '../services/chatRecordingService.js';
+import type { ContentGenerator } from './contentGenerator.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
-import { ideContext } from '../ide/ideContext.js';
-import { logNextSpeakerCheck } from '../telemetry/loggers.js';
+import { ChatCompressionService } from '../services/chatCompressionService.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import {
-  MalformedJsonResponseEvent,
+  logContentRetryFailure,
+  logNextSpeakerCheck,
+} from '../telemetry/loggers.js';
+import type {
+  DefaultHookOutput,
+  AfterAgentHookOutput,
+} from '../hooks/types.js';
+import {
+  ContentRetryFailureEvent,
   NextSpeakerCheckEvent,
 } from '../telemetry/types.js';
-import { ClearcutLogger } from '../telemetry/clearcut-logger/clearcut-logger.js';
-import { IdeContext, File } from '../ide/ideContext.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { IdeContext, File } from '../ide/types.js';
+import { handleFallback } from '../fallback/handler.js';
+import type { RoutingContext } from '../routing/routingStrategy.js';
+import { debugLogger } from '../utils/debugLogger.js';
+import type { ModelConfigKey } from '../services/modelConfigService.js';
+import { calculateRequestTokenCount } from '../utils/tokenCalculation.js';
+import {
+  applyModelSelection,
+  createAvailabilityContextProvider,
+} from '../availability/policyHelpers.js';
+import { resolveModel } from '../config/models.js';
+import type { RetryAvailabilityContext } from '../utils/retry.js';
+import { partToString } from '../utils/partUtils.js';
+import { coreEvents, CoreEvent } from '../utils/events.js';
 
-function isThinkingSupported(model: string) {
-  if (model.startsWith('gemini-2.5')) return true;
-  return false;
-}
+const MAX_TURNS = 100;
 
-/**
- * Returns the index of the content after the fraction of the total characters in the history.
- *
- * Exported for testing purposes.
- */
-export function findIndexAfterFraction(
-  history: Content[],
-  fraction: number,
-): number {
-  if (fraction <= 0 || fraction >= 1) {
-    throw new Error('Fraction must be between 0 and 1');
-  }
-
-  const contentLengths = history.map(
-    (content) => JSON.stringify(content).length,
-  );
-
-  const totalCharacters = contentLengths.reduce(
-    (sum, length) => sum + length,
-    0,
-  );
-  const targetCharacters = totalCharacters * fraction;
-
-  let charactersSoFar = 0;
-  for (let i = 0; i < contentLengths.length; i++) {
-    charactersSoFar += contentLengths[i];
-    if (charactersSoFar >= targetCharacters) {
-      return i;
+type BeforeAgentHookReturn =
+  | {
+      type: GeminiEventType.AgentExecutionStopped;
+      value: { reason: string; systemMessage?: string };
     }
-  }
-  return contentLengths.length;
-}
+  | {
+      type: GeminiEventType.AgentExecutionBlocked;
+      value: { reason: string; systemMessage?: string };
+    }
+  | { additionalContext: string | undefined }
+  | undefined;
 
 export class GeminiClient {
   private chat?: GeminiChat;
-  private contentGenerator?: ContentGenerator;
-  private embeddingModel: string;
-  private generateContentConfig: GenerateContentConfig = {
-    temperature: 0,
-    topP: 1,
-  };
   private sessionTurnCount = 0;
-  private readonly MAX_TURNS = 100;
-  /**
-   * Threshold for compression token count as a fraction of the model's token limit.
-   * If the chat history exceeds this threshold, it will be compressed.
-   */
-  private readonly COMPRESSION_TOKEN_THRESHOLD = 0.7;
-  /**
-   * The fraction of the latest chat history to keep. A value of 0.3
-   * means that only the last 30% of the chat history will be kept after compression.
-   */
-  private readonly COMPRESSION_PRESERVE_THRESHOLD = 0.3;
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly compressionService: ChatCompressionService;
   private lastPromptId: string;
+  private currentSequenceModel: string | null = null;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
 
-  constructor(private config: Config) {
-    if (config.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(config.getProxy() as string));
+  /**
+   * At any point in this conversation, was compression triggered without
+   * being forced and did it fail?
+   */
+  private hasFailedCompressionAttempt = false;
+
+  constructor(private readonly config: Config) {
+    this.loopDetector = new LoopDetectionService(config);
+    this.compressionService = new ChatCompressionService();
+    this.lastPromptId = this.config.getSessionId();
+
+    coreEvents.on(CoreEvent.ModelChanged, this.handleModelChanged);
+  }
+
+  private handleModelChanged = () => {
+    this.currentSequenceModel = null;
+  };
+
+  // Hook state to deduplicate BeforeAgent calls and track response for
+  // AfterAgent
+  private hookStateMap = new Map<
+    string,
+    {
+      hasFiredBeforeAgent: boolean;
+      cumulativeResponse: string;
+      activeCalls: number;
+      originalRequest: PartListUnion;
+    }
+  >();
+
+  private async fireBeforeAgentHookSafe(
+    request: PartListUnion,
+    prompt_id: string,
+  ): Promise<BeforeAgentHookReturn> {
+    let hookState = this.hookStateMap.get(prompt_id);
+    if (!hookState) {
+      hookState = {
+        hasFiredBeforeAgent: false,
+        cumulativeResponse: '',
+        activeCalls: 0,
+        originalRequest: request,
+      };
+      this.hookStateMap.set(prompt_id, hookState);
     }
 
-    this.embeddingModel = config.getEmbeddingModel();
-    this.loopDetector = new LoopDetectionService(config);
-    this.lastPromptId = this.config.getSessionId();
+    // Increment active calls for this prompt_id
+    // This is called at the start of sendMessageStream, so it acts as an entry
+    // counter. We increment here, assuming this helper is ALWAYS called at
+    // entry.
+    hookState.activeCalls++;
+
+    if (hookState.hasFiredBeforeAgent) {
+      return undefined;
+    }
+
+    const hookOutput = await this.config
+      .getHookSystem()
+      ?.fireBeforeAgentEvent(partToString(request));
+    hookState.hasFiredBeforeAgent = true;
+
+    if (hookOutput?.shouldStopExecution()) {
+      return {
+        type: GeminiEventType.AgentExecutionStopped,
+        value: {
+          reason: hookOutput.getEffectiveReason(),
+          systemMessage: hookOutput.systemMessage,
+        },
+      };
+    }
+
+    if (hookOutput?.isBlockingDecision()) {
+      return {
+        type: GeminiEventType.AgentExecutionBlocked,
+        value: {
+          reason: hookOutput.getEffectiveReason(),
+          systemMessage: hookOutput.systemMessage,
+        },
+      };
+    }
+
+    const additionalContext = hookOutput?.getAdditionalContext();
+    if (additionalContext) {
+      return { additionalContext };
+    }
+    return undefined;
   }
 
-  async initialize(contentGeneratorConfig: ContentGeneratorConfig) {
-    this.contentGenerator = await createContentGenerator(
-      contentGeneratorConfig,
-      this.config,
-      this.config.getSessionId(),
-    );
+  private async fireAfterAgentHookSafe(
+    currentRequest: PartListUnion,
+    prompt_id: string,
+    turn?: Turn,
+  ): Promise<DefaultHookOutput | undefined> {
+    const hookState = this.hookStateMap.get(prompt_id);
+    // Only fire on the outermost call (when activeCalls is 1)
+    if (!hookState || hookState.activeCalls !== 1) {
+      return undefined;
+    }
+
+    if (turn && turn.pendingToolCalls.length > 0) {
+      return undefined;
+    }
+
+    const finalResponseText =
+      hookState.cumulativeResponse ||
+      turn?.getResponseText() ||
+      '[no response text]';
+    const finalRequest = hookState.originalRequest || currentRequest;
+
+    const hookOutput = await this.config
+      .getHookSystem()
+      ?.fireAfterAgentEvent(partToString(finalRequest), finalResponseText);
+
+    return hookOutput;
+  }
+
+  private updateTelemetryTokenCount() {
+    if (this.chat) {
+      uiTelemetryService.setLastPromptTokenCount(
+        this.chat.getLastPromptTokenCount(),
+      );
+    }
+  }
+
+  async initialize() {
     this.chat = await this.startChat();
+    this.updateTelemetryTokenCount();
   }
 
-  getContentGenerator(): ContentGenerator {
-    if (!this.contentGenerator) {
+  private getContentGeneratorOrFail(): ContentGenerator {
+    if (!this.config.getContentGenerator()) {
       throw new Error('Content generator not initialized');
     }
-    return this.contentGenerator;
-  }
-
-  getAuthType(): string | undefined {
-    return this.config.getContentGeneratorConfig()?.authType;
-  }
-
-  getUserTier(): UserTierId | undefined {
-    return this.contentGenerator?.userTier;
+    return this.config.getContentGenerator();
   }
 
   async addHistory(content: Content) {
@@ -161,44 +236,25 @@ export class GeminiClient {
   }
 
   isInitialized(): boolean {
-    return this.chat !== undefined && this.contentGenerator !== undefined;
+    return this.chat !== undefined;
   }
 
   getHistory(): Content[] {
     return this.getChat().getHistory();
   }
 
-  setHistory(
-    history: Content[],
-    { stripThoughts = false }: { stripThoughts?: boolean } = {},
-  ) {
-    const historyToSet = stripThoughts
-      ? history.map((content) => {
-          const newContent = { ...content };
-          if (newContent.parts) {
-            newContent.parts = newContent.parts.map((part) => {
-              if (
-                part &&
-                typeof part === 'object' &&
-                'thoughtSignature' in part
-              ) {
-                const newPart = { ...part };
-                delete (newPart as { thoughtSignature?: string })
-                  .thoughtSignature;
-                return newPart;
-              }
-              return part;
-            });
-          }
-          return newContent;
-        })
-      : history;
-    this.getChat().setHistory(historyToSet);
+  stripThoughtsFromHistory() {
+    this.getChat().stripThoughtsFromHistory();
+  }
+
+  setHistory(history: Content[]) {
+    this.getChat().setHistory(history);
+    this.updateTelemetryTokenCount();
     this.forceFullIdeContext = true;
   }
 
   async setTools(): Promise<void> {
-    const toolRegistry = await this.config.getToolRegistry();
+    const toolRegistry = this.config.getToolRegistry();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
@@ -206,6 +262,31 @@ export class GeminiClient {
 
   async resetChat(): Promise<void> {
     this.chat = await this.startChat();
+    this.updateTelemetryTokenCount();
+  }
+
+  dispose() {
+    coreEvents.off(CoreEvent.ModelChanged, this.handleModelChanged);
+  }
+
+  async resumeChat(
+    history: Content[],
+    resumedSessionData?: ResumedSessionData,
+  ): Promise<void> {
+    this.chat = await this.startChat(history, resumedSessionData);
+    this.updateTelemetryTokenCount();
+  }
+
+  getChatRecordingService(): ChatRecordingService | undefined {
+    return this.chat?.getChatRecordingService();
+  }
+
+  getLoopDetectionService(): LoopDetectionService {
+    return this.loopDetector;
+  }
+
+  getCurrentSequenceModel(): string | null {
+    return this.currentSequenceModel;
   }
 
   async addDirectoryContext(): Promise<void> {
@@ -219,45 +300,42 @@ export class GeminiClient {
     });
   }
 
-  async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
+  updateSystemInstruction(): void {
+    if (!this.isInitialized()) {
+      return;
+    }
+
+    const systemMemory = this.config.isJitContextEnabled()
+      ? this.config.getGlobalMemory()
+      : this.config.getUserMemory();
+    const systemInstruction = getCoreSystemPrompt(this.config, systemMemory);
+    this.getChat().setSystemInstruction(systemInstruction);
+  }
+
+  async startChat(
+    extraHistory?: Content[],
+    resumedSessionData?: ResumedSessionData,
+  ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
-    const envParts = await getEnvironmentContext(this.config);
-    const toolRegistry = await this.config.getToolRegistry();
+    this.hasFailedCompressionAttempt = false;
+
+    const toolRegistry = this.config.getToolRegistry();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
-    const history: Content[] = [
-      {
-        role: 'user',
-        parts: envParts,
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'Got it. Thanks for the context!' }],
-      },
-      ...(extraHistory ?? []),
-    ];
+
+    const history = await getInitialChatHistory(this.config, extraHistory);
+
     try {
-      const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(userMemory);
-      const generateContentConfigWithThinking = isThinkingSupported(
-        this.config.getModel(),
-      )
-        ? {
-            ...this.generateContentConfig,
-            thinkingConfig: {
-              includeThoughts: true,
-            },
-          }
-        : this.generateContentConfig;
+      const systemMemory = this.config.isJitContextEnabled()
+        ? this.config.getGlobalMemory()
+        : this.config.getUserMemory();
+      const systemInstruction = getCoreSystemPrompt(this.config, systemMemory);
       return new GeminiChat(
         this.config,
-        this.getContentGenerator(),
-        {
-          systemInstruction,
-          ...generateContentConfigWithThinking,
-          tools,
-        },
+        systemInstruction,
+        tools,
         history,
+        resumedSessionData,
       );
     } catch (error) {
       await reportError(
@@ -274,7 +352,7 @@ export class GeminiClient {
     contextParts: string[];
     newIdeContext: IdeContext | undefined;
   } {
-    const currentIdeContext = ideContext.getIdeContext();
+    const currentIdeContext = ideContextStore.get();
     if (!currentIdeContext) {
       return { contextParts: [], newIdeContext: undefined };
     }
@@ -290,7 +368,7 @@ export class GeminiClient {
       const contextData: Record<string, unknown> = {};
 
       if (activeFile) {
-        contextData.activeFile = {
+        contextData['activeFile'] = {
           path: activeFile.path,
           cursor: activeFile.cursor
             ? {
@@ -303,7 +381,7 @@ export class GeminiClient {
       }
 
       if (otherOpenFiles.length > 0) {
-        contextData.otherOpenFiles = otherOpenFiles;
+        contextData['otherOpenFiles'] = otherOpenFiles;
       }
 
       if (Object.keys(contextData).length === 0) {
@@ -319,7 +397,7 @@ export class GeminiClient {
       ];
 
       if (this.config.getDebugMode()) {
-        console.log(contextParts.join('\n'));
+        debugLogger.log(contextParts.join('\n'));
       }
       return {
         contextParts,
@@ -349,7 +427,7 @@ export class GeminiClient {
         }
       }
       if (openedFiles.length > 0) {
-        changes.filesOpened = openedFiles;
+        changes['filesOpened'] = openedFiles;
       }
 
       const closedFiles: string[] = [];
@@ -359,7 +437,7 @@ export class GeminiClient {
         }
       }
       if (closedFiles.length > 0) {
-        changes.filesClosed = closedFiles;
+        changes['filesClosed'] = closedFiles;
       }
 
       const lastActiveFile = (
@@ -371,7 +449,7 @@ export class GeminiClient {
 
       if (currentActiveFile) {
         if (!lastActiveFile || lastActiveFile.path !== currentActiveFile.path) {
-          changes.activeFileChanged = {
+          changes['activeFileChanged'] = {
             path: currentActiveFile.path,
             cursor: currentActiveFile.cursor
               ? {
@@ -390,7 +468,7 @@ export class GeminiClient {
               lastCursor.line !== currentCursor.line ||
               lastCursor.character !== currentCursor.character)
           ) {
-            changes.cursorMoved = {
+            changes['cursorMoved'] = {
               path: currentActiveFile.path,
               cursor: {
                 line: currentCursor.line,
@@ -402,14 +480,14 @@ export class GeminiClient {
           const lastSelectedText = lastActiveFile.selectedText || '';
           const currentSelectedText = currentActiveFile.selectedText || '';
           if (lastSelectedText !== currentSelectedText) {
-            changes.selectionChanged = {
+            changes['selectionChanged'] = {
               path: currentActiveFile.path,
               selectedText: currentSelectedText,
             };
           }
         }
       } else if (lastActiveFile) {
-        changes.activeFileChanged = {
+        changes['activeFileChanged'] = {
           path: null,
           previousPath: lastActiveFile.path,
         };
@@ -419,7 +497,7 @@ export class GeminiClient {
         return { contextParts: [], newIdeContext: currentIdeContext };
       }
 
-      delta.changes = changes;
+      delta['changes'] = changes;
       const jsonString = JSON.stringify(delta, null, 2);
       const contextParts = [
         "Here is a summary of changes in the user's editor context, in JSON format. This is for your information only.",
@@ -429,7 +507,7 @@ export class GeminiClient {
       ];
 
       if (this.config.getDebugMode()) {
-        console.log(contextParts.join('\n'));
+        debugLogger.log(contextParts.join('\n'));
       }
       return {
         contextParts,
@@ -438,38 +516,66 @@ export class GeminiClient {
     }
   }
 
-  async *sendMessageStream(
+  private _getActiveModelForCurrentTurn(): string {
+    if (this.currentSequenceModel) {
+      return this.currentSequenceModel;
+    }
+
+    // Availability logic: The configured model is the source of truth,
+    // including any permanent fallbacks (config.setModel) or manual overrides.
+    return resolveModel(this.config.getActiveModel());
+  }
+
+  private async *processTurn(
     request: PartListUnion,
     signal: AbortSignal,
     prompt_id: string,
-    turns: number = this.MAX_TURNS,
-    originalModel?: string,
+    boundedTurns: number,
+    isInvalidStreamRetry: boolean,
+    displayContent?: PartListUnion,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    if (this.lastPromptId !== prompt_id) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-    }
+    // Re-initialize turn (it was empty before if in loop, or new instance)
+    let turn = new Turn(this.getChat(), prompt_id);
+
     this.sessionTurnCount++;
     if (
       this.config.getMaxSessionTurns() > 0 &&
       this.sessionTurnCount > this.config.getMaxSessionTurns()
     ) {
       yield { type: GeminiEventType.MaxSessionTurns };
-      return new Turn(this.getChat(), prompt_id);
+      return turn;
     }
-    // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-    const boundedTurns = Math.min(turns, this.MAX_TURNS);
+
     if (!boundedTurns) {
-      return new Turn(this.getChat(), prompt_id);
+      return turn;
     }
 
-    // Track the original model from the first call to detect model switching
-    const initialModel = originalModel || this.config.getModel();
+    // Check for context window overflow
+    const modelForLimitCheck = this._getActiveModelForCurrentTurn();
 
-    const compressed = await this.tryCompressChat(prompt_id);
+    const compressed = await this.tryCompressChat(prompt_id, false);
 
-    if (compressed) {
+    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
       yield { type: GeminiEventType.ChatCompressed, value: compressed };
+    }
+
+    const remainingTokenCount =
+      tokenLimit(modelForLimitCheck) - this.getChat().getLastPromptTokenCount();
+
+    // Estimate tokens. For text-only requests, we estimate based on character length.
+    // For requests with non-text parts (like images, tools), we use the countTokens API.
+    const estimatedRequestTokenCount = await calculateRequestTokenCount(
+      request,
+      this.getContentGeneratorOrFail(),
+      modelForLimitCheck,
+    );
+
+    if (estimatedRequestTokenCount > remainingTokenCount) {
+      yield {
+        type: GeminiEventType.ContextWindowWillOverflow,
+        value: { estimatedRequestTokenCount, remainingTokenCount },
+      };
+      return turn;
     }
 
     // Prevent context updates from being sent while a tool call is
@@ -499,7 +605,11 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
-    const turn = new Turn(this.getChat(), prompt_id);
+    // Re-initialize turn with fresh history
+    turn = new Turn(this.getChat(), prompt_id);
+
+    const controller = new AbortController();
+    const linkedSignal = AbortSignal.any([signal, controller.signal]);
 
     const loopDetected = await this.loopDetector.turnStarted(signal);
     if (loopDetected) {
@@ -507,197 +617,378 @@ export class GeminiClient {
       return turn;
     }
 
-    const resultStream = turn.run(request, signal);
+    const routingContext: RoutingContext = {
+      history: this.getChat().getHistory(/*curated=*/ true),
+      request,
+      signal,
+      requestedModel: this.config.getModel(),
+    };
+
+    let modelToUse: string;
+
+    // Determine Model (Stickiness vs. Routing)
+    if (this.currentSequenceModel) {
+      modelToUse = this.currentSequenceModel;
+    } else {
+      const router = this.config.getModelRouterService();
+      const decision = await router.route(routingContext);
+      modelToUse = decision.model;
+    }
+
+    // availability logic
+    const modelConfigKey: ModelConfigKey = { model: modelToUse };
+    const { model: finalModel } = applyModelSelection(
+      this.config,
+      modelConfigKey,
+      { consumeAttempt: false },
+    );
+    modelToUse = finalModel;
+
+    if (!signal.aborted && !this.currentSequenceModel) {
+      yield { type: GeminiEventType.ModelInfo, value: modelToUse };
+    }
+    this.currentSequenceModel = modelToUse;
+    const resultStream = turn.run(
+      modelConfigKey,
+      request,
+      linkedSignal,
+      displayContent,
+    );
+    let isError = false;
+    let isInvalidStream = false;
+
     for await (const event of resultStream) {
       if (this.loopDetector.addAndCheck(event)) {
         yield { type: GeminiEventType.LoopDetected };
+        controller.abort();
         return turn;
       }
       yield event;
-    }
-    if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
-      // Check if model was switched during the call (likely due to quota error)
-      const currentModel = this.config.getModel();
-      if (currentModel !== initialModel) {
-        // Model was switched (likely due to quota error fallback)
-        // Don't continue with recursive call to prevent unwanted Flash execution
-        return turn;
-      }
 
-      const nextSpeakerCheck = await checkNextSpeaker(
-        this.getChat(),
-        this,
-        signal,
-      );
-      logNextSpeakerCheck(
-        this.config,
-        new NextSpeakerCheckEvent(
-          prompt_id,
-          turn.finishReason?.toString() || '',
-          nextSpeakerCheck?.next_speaker || '',
-        ),
-      );
-      if (nextSpeakerCheck?.next_speaker === 'model') {
-        const nextRequest = [{ text: 'Please continue.' }];
-        // This recursive call's events will be yielded out, but the final
-        // turn object will be from the top-level call.
-        yield* this.sendMessageStream(
+      this.updateTelemetryTokenCount();
+
+      if (event.type === GeminiEventType.InvalidStream) {
+        isInvalidStream = true;
+      }
+      if (event.type === GeminiEventType.Error) {
+        isError = true;
+      }
+    }
+
+    if (isError) {
+      return turn;
+    }
+
+    // Update cumulative response in hook state
+    // We do this immediately after the stream finishes for THIS turn.
+    const hooksEnabled = this.config.getEnableHooks();
+    if (hooksEnabled) {
+      const responseText = turn.getResponseText() || '';
+      const hookState = this.hookStateMap.get(prompt_id);
+      if (hookState && responseText) {
+        // Append with newline if not empty
+        hookState.cumulativeResponse = hookState.cumulativeResponse
+          ? `${hookState.cumulativeResponse}\n${responseText}`
+          : responseText;
+      }
+    }
+
+    if (isInvalidStream) {
+      if (this.config.getContinueOnFailedApiCall()) {
+        if (isInvalidStreamRetry) {
+          logContentRetryFailure(
+            this.config,
+            new ContentRetryFailureEvent(
+              4,
+              'FAILED_AFTER_PROMPT_INJECTION',
+              modelToUse,
+            ),
+          );
+          return turn;
+        }
+        const nextRequest = [{ text: 'System: Please continue.' }];
+        // Recursive call - update turn with result
+        turn = yield* this.sendMessageStream(
           nextRequest,
           signal,
           prompt_id,
           boundedTurns - 1,
-          initialModel,
+          true,
+          displayContent,
         );
+        return turn;
+      }
+    }
+
+    if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
+      if (
+        !this.config.getQuotaErrorOccurred() &&
+        !this.config.getSkipNextSpeakerCheck()
+      ) {
+        const nextSpeakerCheck = await checkNextSpeaker(
+          this.getChat(),
+          this.config.getBaseLlmClient(),
+          signal,
+          prompt_id,
+        );
+        logNextSpeakerCheck(
+          this.config,
+          new NextSpeakerCheckEvent(
+            prompt_id,
+            turn.finishReason?.toString() || '',
+            nextSpeakerCheck?.next_speaker || '',
+          ),
+        );
+        if (nextSpeakerCheck?.next_speaker === 'model') {
+          const nextRequest = [{ text: 'Please continue.' }];
+          turn = yield* this.sendMessageStream(
+            nextRequest,
+            signal,
+            prompt_id,
+            boundedTurns - 1,
+            false, // isInvalidStreamRetry is false
+            displayContent,
+          );
+          return turn;
+        }
       }
     }
     return turn;
   }
 
-  async generateJson(
-    contents: Content[],
-    schema: Record<string, unknown>,
-    abortSignal: AbortSignal,
-    model?: string,
-    config: GenerateContentConfig = {},
-  ): Promise<Record<string, unknown>> {
-    // Use current model from config instead of hardcoded Flash model
-    const modelToUse =
-      model || this.config.getModel() || DEFAULT_GEMINI_FLASH_MODEL;
-    try {
-      const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(userMemory);
-      const requestConfig = {
-        abortSignal,
-        ...this.generateContentConfig,
-        ...config,
-      };
-
-      const apiCall = () =>
-        this.getContentGenerator().generateContent(
-          {
-            model: modelToUse,
-            config: {
-              ...requestConfig,
-              systemInstruction,
-              responseJsonSchema: schema,
-              responseMimeType: 'application/json',
-            },
-            contents,
-          },
-          this.lastPromptId,
-        );
-
-      const result = await retryWithBackoff(apiCall, {
-        onPersistent429: async (authType?: string, error?: unknown) =>
-          await this.handleFlashFallback(authType, error),
-        authType: this.config.getContentGeneratorConfig()?.authType,
-      });
-
-      let text = getResponseText(result);
-      if (!text) {
-        const error = new Error(
-          'API returned an empty response for generateJson.',
-        );
-        await reportError(
-          error,
-          'Error in generateJson: API returned an empty response.',
-          contents,
-          'generateJson-empty-response',
-        );
-        throw error;
-      }
-
-      const prefix = '```json';
-      const suffix = '```';
-      if (text.startsWith(prefix) && text.endsWith(suffix)) {
-        ClearcutLogger.getInstance(this.config)?.logMalformedJsonResponseEvent(
-          new MalformedJsonResponseEvent(modelToUse),
-        );
-        text = text
-          .substring(prefix.length, text.length - suffix.length)
-          .trim();
-      }
-
-      try {
-        return JSON.parse(text);
-      } catch (parseError) {
-        await reportError(
-          parseError,
-          'Failed to parse JSON response from generateJson.',
-          {
-            responseTextFailedToParse: text,
-            originalRequestContents: contents,
-          },
-          'generateJson-parse',
-        );
-        throw new Error(
-          `Failed to parse API response as JSON: ${getErrorMessage(
-            parseError,
-          )}`,
-        );
-      }
-    } catch (error) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      // Avoid double reporting for the empty response case handled above
-      if (
-        error instanceof Error &&
-        error.message === 'API returned an empty response for generateJson.'
-      ) {
-        throw error;
-      }
-
-      await reportError(
-        error,
-        'Error generating JSON content via API.',
-        contents,
-        'generateJson-api',
-      );
-      throw new Error(
-        `Failed to generate JSON content: ${getErrorMessage(error)}`,
-      );
+  async *sendMessageStream(
+    request: PartListUnion,
+    signal: AbortSignal,
+    prompt_id: string,
+    turns: number = MAX_TURNS,
+    isInvalidStreamRetry: boolean = false,
+    displayContent?: PartListUnion,
+  ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
+    if (!isInvalidStreamRetry) {
+      this.config.resetTurn();
     }
+
+    const hooksEnabled = this.config.getEnableHooks();
+    const messageBus = this.config.getMessageBus();
+
+    if (this.lastPromptId !== prompt_id) {
+      this.loopDetector.reset(prompt_id);
+      this.hookStateMap.delete(this.lastPromptId);
+      this.lastPromptId = prompt_id;
+      this.currentSequenceModel = null;
+    }
+
+    if (hooksEnabled && messageBus) {
+      const hookResult = await this.fireBeforeAgentHookSafe(request, prompt_id);
+      if (hookResult) {
+        if (
+          'type' in hookResult &&
+          hookResult.type === GeminiEventType.AgentExecutionStopped
+        ) {
+          // Add user message to history before returning so it's kept in the transcript
+          this.getChat().addHistory(createUserContent(request));
+          yield hookResult;
+          return new Turn(this.getChat(), prompt_id);
+        } else if (
+          'type' in hookResult &&
+          hookResult.type === GeminiEventType.AgentExecutionBlocked
+        ) {
+          yield hookResult;
+          return new Turn(this.getChat(), prompt_id);
+        } else if ('additionalContext' in hookResult) {
+          const additionalContext = hookResult.additionalContext;
+          if (additionalContext) {
+            const requestArray = Array.isArray(request) ? request : [request];
+            request = [
+              ...requestArray,
+              { text: `<hook_context>${additionalContext}</hook_context>` },
+            ];
+          }
+        }
+      }
+    }
+
+    const boundedTurns = Math.min(turns, MAX_TURNS);
+    let turn = new Turn(this.getChat(), prompt_id);
+
+    try {
+      turn = yield* this.processTurn(
+        request,
+        signal,
+        prompt_id,
+        boundedTurns,
+        isInvalidStreamRetry,
+        displayContent,
+      );
+
+      // Fire AfterAgent hook if we have a turn and no pending tools
+      if (hooksEnabled && messageBus) {
+        const hookOutput = await this.fireAfterAgentHookSafe(
+          request,
+          prompt_id,
+          turn,
+        );
+
+        // Cast to AfterAgentHookOutput for access to shouldClearContext()
+        const afterAgentOutput = hookOutput as AfterAgentHookOutput | undefined;
+
+        if (afterAgentOutput?.shouldStopExecution()) {
+          const contextCleared = afterAgentOutput.shouldClearContext();
+          yield {
+            type: GeminiEventType.AgentExecutionStopped,
+            value: {
+              reason: afterAgentOutput.getEffectiveReason(),
+              systemMessage: afterAgentOutput.systemMessage,
+              contextCleared,
+            },
+          };
+          // Clear context if requested (honor both stop + clear)
+          if (contextCleared) {
+            await this.resetChat();
+          }
+          return turn;
+        }
+
+        if (afterAgentOutput?.isBlockingDecision()) {
+          const continueReason = afterAgentOutput.getEffectiveReason();
+          const contextCleared = afterAgentOutput.shouldClearContext();
+          yield {
+            type: GeminiEventType.AgentExecutionBlocked,
+            value: {
+              reason: continueReason,
+              systemMessage: afterAgentOutput.systemMessage,
+              contextCleared,
+            },
+          };
+          // Clear context if requested
+          if (contextCleared) {
+            await this.resetChat();
+          }
+          const continueRequest = [{ text: continueReason }];
+          yield* this.sendMessageStream(
+            continueRequest,
+            signal,
+            prompt_id,
+            boundedTurns - 1,
+            false,
+            displayContent,
+          );
+        }
+      }
+    } finally {
+      const hookState = this.hookStateMap.get(prompt_id);
+      if (hookState) {
+        hookState.activeCalls--;
+        const isPendingTools =
+          turn?.pendingToolCalls && turn.pendingToolCalls.length > 0;
+        const isAborted = signal?.aborted;
+
+        if (hookState.activeCalls <= 0) {
+          if (!isPendingTools || isAborted) {
+            this.hookStateMap.delete(prompt_id);
+          }
+        }
+      }
+    }
+
+    return turn;
   }
 
   async generateContent(
+    modelConfigKey: ModelConfigKey,
     contents: Content[],
-    generationConfig: GenerateContentConfig,
     abortSignal: AbortSignal,
-    model?: string,
   ): Promise<GenerateContentResponse> {
-    const modelToUse = model ?? this.config.getModel();
-    const configToUse: GenerateContentConfig = {
-      ...this.generateContentConfig,
-      ...generationConfig,
-    };
+    const desiredModelConfig =
+      this.config.modelConfigService.getResolvedConfig(modelConfigKey);
+    let {
+      model: currentAttemptModel,
+      generateContentConfig: currentAttemptGenerateContentConfig,
+    } = desiredModelConfig;
 
     try {
       const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(userMemory);
+      const systemInstruction = getCoreSystemPrompt(this.config, userMemory);
+      const {
+        model,
+        config: newConfig,
+        maxAttempts: availabilityMaxAttempts,
+      } = applyModelSelection(this.config, modelConfigKey);
+      currentAttemptModel = model;
+      if (newConfig) {
+        currentAttemptGenerateContentConfig = newConfig;
+      }
 
-      const requestConfig = {
-        abortSignal,
-        ...configToUse,
-        systemInstruction,
-      };
+      // Define callback to refresh context based on currentAttemptModel which might be updated by fallback handler
+      const getAvailabilityContext: () => RetryAvailabilityContext | undefined =
+        createAvailabilityContextProvider(
+          this.config,
+          () => currentAttemptModel,
+        );
 
-      const apiCall = () =>
-        this.getContentGenerator().generateContent(
+      const apiCall = () => {
+        // AvailabilityService
+        const active = this.config.getActiveModel();
+        if (active !== currentAttemptModel) {
+          currentAttemptModel = active;
+          // Re-resolve config if model changed
+          const newConfig = this.config.modelConfigService.getResolvedConfig({
+            ...modelConfigKey,
+            model: currentAttemptModel,
+          });
+          currentAttemptGenerateContentConfig = newConfig.generateContentConfig;
+        }
+
+        const requestConfig: GenerateContentConfig = {
+          ...currentAttemptGenerateContentConfig,
+          abortSignal,
+          systemInstruction,
+        };
+
+        return this.getContentGeneratorOrFail().generateContent(
           {
-            model: modelToUse,
+            model: currentAttemptModel,
             config: requestConfig,
             contents,
           },
           this.lastPromptId,
         );
+      };
+      const onPersistent429Callback = async (
+        authType?: string,
+        error?: unknown,
+      ) =>
+        // Pass the captured model to the centralized handler.
+        handleFallback(this.config, currentAttemptModel, authType, error);
+
+      const onValidationRequiredCallback = async (
+        validationError: ValidationRequiredError,
+      ) => {
+        // Suppress validation dialog for background calls (e.g. prompt-completion)
+        // to prevent the dialog from appearing on startup or during typing.
+        if (modelConfigKey.model === 'prompt-completion') {
+          throw validationError;
+        }
+
+        const handler = this.config.getValidationHandler();
+        if (typeof handler !== 'function') {
+          throw validationError;
+        }
+        return handler(
+          validationError.validationLink,
+          validationError.validationDescription,
+          validationError.learnMoreUrl,
+        );
+      };
 
       const result = await retryWithBackoff(apiCall, {
-        onPersistent429: async (authType?: string, error?: unknown) =>
-          await this.handleFlashFallback(authType, error),
+        onPersistent429: onPersistent429Callback,
+        onValidationRequired: onValidationRequiredCallback,
         authType: this.config.getContentGeneratorConfig()?.authType,
+        maxAttempts: availabilityMaxAttempts,
+        getAvailabilityContext,
       });
+
       return result;
     } catch (error: unknown) {
       if (abortSignal.aborted) {
@@ -706,192 +997,63 @@ export class GeminiClient {
 
       await reportError(
         error,
-        `Error generating content via API with model ${modelToUse}.`,
+        `Error generating content via API with model ${currentAttemptModel}.`,
         {
           requestContents: contents,
-          requestConfig: configToUse,
+          requestConfig: currentAttemptGenerateContentConfig,
         },
         'generateContent-api',
       );
       throw new Error(
-        `Failed to generate content with model ${modelToUse}: ${getErrorMessage(error)}`,
+        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
       );
     }
-  }
-
-  async generateEmbedding(texts: string[]): Promise<number[][]> {
-    if (!texts || texts.length === 0) {
-      return [];
-    }
-    const embedModelParams: EmbedContentParameters = {
-      model: this.embeddingModel,
-      contents: texts,
-    };
-
-    const embedContentResponse =
-      await this.getContentGenerator().embedContent(embedModelParams);
-    if (
-      !embedContentResponse.embeddings ||
-      embedContentResponse.embeddings.length === 0
-    ) {
-      throw new Error('No embeddings found in API response.');
-    }
-
-    if (embedContentResponse.embeddings.length !== texts.length) {
-      throw new Error(
-        `API returned a mismatched number of embeddings. Expected ${texts.length}, got ${embedContentResponse.embeddings.length}.`,
-      );
-    }
-
-    return embedContentResponse.embeddings.map((embedding, index) => {
-      const values = embedding.values;
-      if (!values || values.length === 0) {
-        throw new Error(
-          `API returned an empty embedding for input text at index ${index}: "${texts[index]}"`,
-        );
-      }
-      return values;
-    });
   }
 
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
-  ): Promise<ChatCompressionInfo | null> {
-    const curatedHistory = this.getChat().getHistory(true);
+  ): Promise<ChatCompressionInfo> {
+    // If the model is 'auto', we will use a placeholder model to check.
+    // Compression occurs before we choose a model, so calling `count_tokens`
+    // before the model is chosen would result in an error.
+    const model = this._getActiveModelForCurrentTurn();
 
-    // Regardless of `force`, don't do anything if the history is empty.
-    if (curatedHistory.length === 0) {
-      return null;
-    }
-
-    const model = this.config.getModel();
-
-    const { totalTokens: originalTokenCount } =
-      await this.getContentGenerator().countTokens({
-        model,
-        contents: curatedHistory,
-      });
-    if (originalTokenCount === undefined) {
-      console.warn(`Could not determine token count for model ${model}.`);
-      return null;
-    }
-
-    const contextPercentageThreshold =
-      this.config.getChatCompression()?.contextPercentageThreshold;
-
-    // Don't compress if not forced and we are under the limit.
-    if (!force) {
-      const threshold =
-        contextPercentageThreshold ?? this.COMPRESSION_TOKEN_THRESHOLD;
-      if (originalTokenCount < threshold * tokenLimit(model)) {
-        return null;
-      }
-    }
-
-    let compressBeforeIndex = findIndexAfterFraction(
-      curatedHistory,
-      1 - this.COMPRESSION_PRESERVE_THRESHOLD,
-    );
-    // Find the first user message after the index. This is the start of the next turn.
-    while (
-      compressBeforeIndex < curatedHistory.length &&
-      (curatedHistory[compressBeforeIndex]?.role === 'model' ||
-        isFunctionResponse(curatedHistory[compressBeforeIndex]))
-    ) {
-      compressBeforeIndex++;
-    }
-
-    const historyToCompress = curatedHistory.slice(0, compressBeforeIndex);
-    const historyToKeep = curatedHistory.slice(compressBeforeIndex);
-
-    this.getChat().setHistory(historyToCompress);
-
-    const { text: summary } = await this.getChat().sendMessage(
-      {
-        message: {
-          text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
-        },
-        config: {
-          systemInstruction: { text: getCompressionPrompt() },
-        },
-      },
+    const { newHistory, info } = await this.compressionService.compress(
+      this.getChat(),
       prompt_id,
+      force,
+      model,
+      this.config,
+      this.hasFailedCompressionAttempt,
     );
-    this.chat = await this.startChat([
-      {
-        role: 'user',
-        parts: [{ text: summary }],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'Got it. Thanks for the additional context!' }],
-      },
-      ...historyToKeep,
-    ]);
-    this.forceFullIdeContext = true;
 
-    const { totalTokens: newTokenCount } =
-      await this.getContentGenerator().countTokens({
-        // model might change after calling `sendMessage`, so we get the newest value from config
-        model: this.config.getModel(),
-        contents: this.getChat().getHistory(),
-      });
-    if (newTokenCount === undefined) {
-      console.warn('Could not determine compressed history token count.');
-      return null;
-    }
+    if (
+      info.compressionStatus ===
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT
+    ) {
+      this.hasFailedCompressionAttempt =
+        this.hasFailedCompressionAttempt || !force;
+    } else if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      if (newHistory) {
+        // capture current session data before resetting
+        const currentRecordingService =
+          this.getChat().getChatRecordingService();
+        const conversation = currentRecordingService.getConversation();
+        const filePath = currentRecordingService.getConversationFilePath();
 
-    return {
-      originalTokenCount,
-      newTokenCount,
-    };
-  }
+        let resumedData: ResumedSessionData | undefined;
 
-  /**
-   * Handles falling back to Flash model when persistent 429 errors occur for OAuth users.
-   * Uses a fallback handler if provided by the config; otherwise, returns null.
-   */
-  private async handleFlashFallback(
-    authType?: string,
-    error?: unknown,
-  ): Promise<string | null> {
-    // Only handle fallback for OAuth users
-    if (authType !== AuthType.LOGIN_WITH_GOOGLE) {
-      return null;
-    }
-
-    const currentModel = this.config.getModel();
-    const fallbackModel = DEFAULT_GEMINI_FLASH_MODEL;
-
-    // Don't fallback if already using Flash model
-    if (currentModel === fallbackModel) {
-      return null;
-    }
-
-    // Check if config has a fallback handler (set by CLI package)
-    const fallbackHandler = this.config.flashFallbackHandler;
-    if (typeof fallbackHandler === 'function') {
-      try {
-        const accepted = await fallbackHandler(
-          currentModel,
-          fallbackModel,
-          error,
-        );
-        if (accepted !== false && accepted !== null) {
-          this.config.setModel(fallbackModel);
-          this.config.setFallbackMode(true);
-          return fallbackModel;
+        if (conversation && filePath) {
+          resumedData = { conversation, filePath };
         }
-        // Check if the model was switched manually in the handler
-        if (this.config.getModel() === fallbackModel) {
-          return null; // Model was switched but don't continue with current prompt
-        }
-      } catch (error) {
-        console.warn('Flash fallback handler failed:', error);
+
+        this.chat = await this.startChat(newHistory, resumedData);
+        this.updateTelemetryTokenCount();
+        this.forceFullIdeContext = true;
       }
     }
 
-    return null;
+    return info;
   }
 }
