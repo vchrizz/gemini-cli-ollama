@@ -466,6 +466,15 @@ export interface ConfigParameters {
     adminSkillsEnabled?: boolean;
     agents?: AgentSettings;
   }>;
+  ollamaBaseUrl?: string;
+  ollamaModel?: string;
+  ollamaEnableChatApi?: boolean;
+  ollamaChatTimeout?: number;
+  ollamaStreamingTimeout?: number;
+  ollamaContextLimit?: number;
+  ollamaRequestContextSize?: number;
+  ollamaTemperature?: number;
+  ollamaDebugLogging?: boolean;
 }
 
 export class Config {
@@ -560,6 +569,15 @@ export class Config {
   readonly interactive: boolean;
   private readonly ptyInfo: string;
   private readonly trustedFolder: boolean | undefined;
+  private readonly ollamaBaseUrl: string | undefined;
+  private readonly ollamaModel: string | undefined;
+  private readonly ollamaEnableChatApi: boolean;
+  private readonly ollamaChatTimeout: number;
+  private readonly ollamaStreamingTimeout: number;
+  private readonly ollamaContextLimit: number;
+  private readonly ollamaRequestContextSize: number;
+  private readonly ollamaTemperature: number;
+  private readonly ollamaDebugLogging: boolean;
   private readonly useRipgrep: boolean;
   private readonly enableInteractiveShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
@@ -730,6 +748,15 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.ptyInfo = params.ptyInfo ?? 'child_process';
     this.trustedFolder = params.trustedFolder;
+    this.ollamaBaseUrl = params.ollamaBaseUrl;
+    this.ollamaModel = params.ollamaModel;
+    this.ollamaEnableChatApi = params.ollamaEnableChatApi ?? true;
+    this.ollamaChatTimeout = params.ollamaChatTimeout ?? 300;
+    this.ollamaStreamingTimeout = params.ollamaStreamingTimeout ?? 600;
+    this.ollamaContextLimit = params.ollamaContextLimit ?? 8192;
+    this.ollamaRequestContextSize = params.ollamaRequestContextSize ?? 8192;
+    this.ollamaTemperature = params.ollamaTemperature ?? 0.7;
+    this.ollamaDebugLogging = params.ollamaDebugLogging ?? false;
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBackgroundColor = params.useBackgroundColor ?? true;
     this.enableInteractiveShell = params.enableInteractiveShell ?? false;
@@ -1115,6 +1142,10 @@ export class Config {
   }
 
   getModel(): string {
+    // For Ollama, use the Ollama-specific model if available
+    if (this.contentGeneratorConfig?.authType === AuthType.USE_OLLAMA && this.ollamaModel) {
+      return this.ollamaModel;
+    }
     return this.model;
   }
 

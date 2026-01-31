@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   Content,
   CountTokensParameters,
   CountTokensResponse,
@@ -12,12 +12,16 @@ import {
   GenerateContentParameters,
   GenerateContentResponse,
   GenerateContentResponseUsageMetadata,
-  ContentListUnion,
   FinishReason,
   Candidate,
-  ToolListUnion,
   FunctionCall,
+  Part,
+  Tool,
 } from '@google/genai';
+
+// Define types that may not be exported from @google/genai
+type ContentListUnion = Content | Content[] | Part | Part[];
+type ToolListUnion = Tool | Tool[];
 import { ContentGenerator } from './contentGenerator.js';
 import { setOllamaModelContextLength, getOllamaModelContextLength } from './ollamaTokenLimits.js';
 

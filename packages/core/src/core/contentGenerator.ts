@@ -23,6 +23,7 @@ import { InstallationManager } from '../utils/installationManager.js';
 import { FakeContentGenerator } from './fakeContentGenerator.js';
 import { parseCustomHeaders } from '../utils/customHeaderUtils.js';
 import { RecordingContentGenerator } from './recordingContentGenerator.js';
+import { OllamaContentGenerator } from './ollamaContentGenerator.js';
 import { getVersion, resolveModel } from '../../index.js';
 
 /**
@@ -54,6 +55,7 @@ export enum AuthType {
   USE_VERTEX_AI = 'vertex-ai',
   LEGACY_CLOUD_SHELL = 'cloud-shell',
   COMPUTE_ADC = 'compute-default-credentials',
+  USE_OLLAMA = 'ollama',
 }
 
 export type ContentGeneratorConfig = {
@@ -61,6 +63,15 @@ export type ContentGeneratorConfig = {
   vertexai?: boolean;
   authType?: AuthType;
   proxy?: string;
+  model?: string;
+  ollamaBaseUrl?: string;
+  ollamaEnableChatApi?: boolean;
+  ollamaChatTimeout?: number;
+  ollamaStreamingTimeout?: number;
+  ollamaContextLimit?: number;
+  ollamaRequestContextSize?: number;
+  ollamaTemperature?: number;
+  ollamaDebugLogging?: boolean;
 };
 
 export async function createContentGeneratorConfig(
@@ -79,6 +90,7 @@ export async function createContentGeneratorConfig(
   const contentGeneratorConfig: ContentGeneratorConfig = {
     authType,
     proxy: config?.getProxy(),
+    model: config?.getModel(),
     ollamaBaseUrl: config?.getOllamaBaseUrl(),
     ollamaEnableChatApi: config?.getOllamaEnableChatApi(),
     ollamaChatTimeout: config?.getOllamaChatTimeout(),
@@ -200,6 +212,40 @@ export async function createContentGenerator(
       });
       return new LoggingContentGenerator(googleGenAI.models, gcConfig);
     }
+    if (config.authType === AuthType.USE_OLLAMA) {
+      const debugLoggingEnabled = config.ollamaDebugLogging || false;
+
+      if (debugLoggingEnabled) {
+        console.log('Creating OllamaContentGenerator with config:', {
+          authType: config.authType,
+          baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
+          model: config.model,
+          enableChatApi: config.ollamaEnableChatApi,
+          debugLogging: debugLoggingEnabled
+        });
+      }
+
+      const ollamaConfig = {
+        baseUrl: config.ollamaBaseUrl || 'http://localhost:11434',
+        model: config.model,
+        enableChatApi: config.ollamaEnableChatApi,
+        timeout: (config.ollamaChatTimeout || 300) * 1000,
+        streamingTimeout: (config.ollamaStreamingTimeout || 600) * 1000,
+        contextLimit: config.ollamaContextLimit || 8192,
+        requestContextSize: config.ollamaRequestContextSize || 8192,
+        temperature: config.ollamaTemperature || 0.7,
+        debugLogging: debugLoggingEnabled,
+      };
+      const ollamaGenerator = new OllamaContentGenerator(ollamaConfig);
+
+      await ollamaGenerator.ensureContextLengthInitialized();
+
+      if (debugLoggingEnabled) {
+        console.log('OllamaContentGenerator created and initialized');
+      }
+      return new LoggingContentGenerator(ollamaGenerator, gcConfig);
+    }
+
     throw new Error(
       `Error creating contentGenerator: Unsupported authType: ${config.authType}`,
     );

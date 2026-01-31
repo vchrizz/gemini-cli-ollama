@@ -12,6 +12,7 @@ import { extensionsCommand } from '../commands/extensions.js';
 import { skillsCommand } from '../commands/skills.js';
 import { hooksCommand } from '../commands/hooks.js';
 import {
+  AuthType,
   Config,
   setGeminiMdFilename as setServerGeminiMdFilename,
   getCurrentGeminiMdFilename,
